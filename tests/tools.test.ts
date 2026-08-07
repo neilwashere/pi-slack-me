@@ -3,8 +3,7 @@ import { invoke, firstText } from "./_helpers";
 
 beforeEach(async () => {
   process.env.SLACK_USER_TOKEN = "xoxp-test";
-  // Fresh modules so the in-process user-name cache (lib/users.ts) does not
-  // leak resolved names across tests within this file.
+  // Fresh modules isolate the default workspace metadata caches between tests.
   vi.resetModules();
 });
 
@@ -274,13 +273,13 @@ describe("slack_download_file", () => {
 });
 
 describe("auth gate (all tools)", () => {
-  it("every tool returns a SlackAuthError-shaped message when the token is missing", async () => {
+  it("every tool throws a SlackAuthError when the token is missing", async () => {
     delete process.env.SLACK_USER_TOKEN;
     const { listChannelsTool } = await import("../lib/tools/list-channels");
     const { readMessagesTool } = await import("../lib/tools/read-messages");
-    const text = firstText(await invoke(listChannelsTool, {}));
-    expect(text).toMatch(/SLACK_USER_TOKEN/);
-    const text2 = firstText(await invoke(readMessagesTool, { channel: "C1" }));
-    expect(text2).toMatch(/SLACK_USER_TOKEN/);
+    await expect(invoke(listChannelsTool, {})).rejects.toThrow(/SLACK_USER_TOKEN/);
+    await expect(
+      invoke(readMessagesTool, { channel: "C1" }),
+    ).rejects.toThrow(/SLACK_USER_TOKEN/);
   });
 });

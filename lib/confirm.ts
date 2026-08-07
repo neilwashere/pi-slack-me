@@ -46,11 +46,10 @@ export const ALLOW_HEADLESS_WRITE_FLAG_DESCRIPTION =
 
 const SETTINGS_FILENAME = "pi-slack-me.json";
 const DEFAULT_CONFIRM_WRITE = true;
-const DEFAULT_ALLOW_HEADLESS_WRITE = false;
 
 // Resolve the agent config dir the same way pi does (dist/config.js getAgentDir):
 // env override wins, else ~/.pi/agent. Exported so tests can point it elsewhere.
-export function getPiDir(): string {
+function getPiDir(): string {
   const envDir = process.env.PI_CODING_AGENT_DIR;
   if (envDir) return envDir;
   return join(homedir(), ".pi", "agent");
@@ -208,7 +207,7 @@ function oneLine(text: string): string {
   return flat.length > PREVIEW_CAP ? `${flat.slice(0, PREVIEW_CAP)}...` : flat;
 }
 
-export function describeTarget(channel?: string, toUser?: string): string {
+function describeTarget(channel?: string, toUser?: string): string {
   if (toUser) return `@${toUser} (DM)`;
   return channel ?? "(no channel)";
 }

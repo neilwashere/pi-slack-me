@@ -1,4 +1,6 @@
-# @estebanforge/pi-slack-me
+# pi-slack-me
+
+Maintained at [neilwashere/pi-slack-me](https://github.com/neilwashere/pi-slack-me), based on the original `@estebanforge/pi-slack-me` package.
 
 Slack tools for [pi](https://github.com/earendil-works/pi-coding-agent) that act as **you**, not as a bot.
 
@@ -167,28 +169,32 @@ No `/invite` step. No bot in any channel. The Web API tools and Socket Mode even
 ## Install
 
 ```bash
-pi install @estebanforge/pi-slack-me
+pi install git:github.com/neilwashere/pi-slack-me
 ```
 
 Requires Node.js 20.18.1 or newer (the minimum supported by the Socket Mode transport dependency).
 
 ## Commands
 
-Tool-oriented commands immediately send an instruction to the agent, or queue it when the agent is busy. `/slack inbox` is deliberately different: it places untrusted Slack content in the editor for review and requires you to press Enter.
+Operational commands call Slack directly without starting an agent turn. In TUI mode, results open in an ephemeral viewer: use the arrow keys or `j`/`k` to scroll, press `e` to place the result in the editor, or press Enter/Esc to close. Loading a result into the editor remains explicit because Slack content is untrusted external data.
+
+Natural-language Slack requests still use the LLM-callable tools. The bundled `slack-workflows` skill supplies multi-step discovery, reading, trust, and write-gate guidance only when a Slack task needs it.
 
 | Command | Description |
 | --- | --- |
 | `/slack` | Show token status and usage |
-| `/slack channels [types]` | Ask the agent to list public channels by default, or the requested conversation types |
-| `/slack dms` | Ask the agent to list your DMs with `slack_list_channels` |
-| `/slack read <channel> [N]` | Ask the agent to read recent messages with `slack_read_messages` |
-| `/slack thread <channel> <ts>` | Ask the agent to read a thread with `slack_read_thread` |
-| `/slack search <query>` | Ask the agent to search messages with `slack_search` |
-| `/slack post <channel> <text>` | Ask the agent to post with `slack_post_message` |
-| `/slack dm <user> <text>` | Ask the agent to DM a user with `slack_post_message` |
-| `/slack reply <channel> <ts> <text>` | Ask the agent to reply with `slack_post_message` |
-| `/slack edit <channel> <ts> <text>` | Ask the agent to edit with `slack_update_message` |
-| `/slack delete <channel> <ts>` | Ask the agent to delete with `slack_delete_message` |
+| `/slack channels [types]` | List public channels by default, or the requested conversation types |
+| `/slack dms` | List your DMs |
+| `/slack read <channel> [N]` | Read recent messages from a conversation |
+| `/slack thread <channel> <ts>` | Read a thread and its replies |
+| `/slack search <query>` | Search workspace messages |
+| `/slack download <file_id>` | Download a Slack file to a safe temporary path |
+| `/slack post <channel> <text>` | Review and post a message |
+| `/slack dm <user> <text>` | Review and send a DM |
+| `/slack reply <channel> <ts> <text>` | Review and reply in a thread |
+| `/slack edit <channel> <ts> <text>` | Review and edit one of your messages |
+| `/slack delete <channel> <ts>` | Confirm and permanently delete one of your messages |
+| `/slack react <channel> <ts> <emoji>` | Add a reaction immediately |
 | `/slack inbox [N]` | Place the latest 1-100 retained messages in the editor without submitting them |
 | `/slack inbox clear` | Empty the in-memory inbox |
 | `/slack listen status\|on\|off` | Inspect or control the session's Socket Mode connection |

@@ -65,7 +65,7 @@ export interface SlackFileInfo {
 }
 
 // search.messages match object.
-export interface SlackSearchMatch {
+interface SlackSearchMatch {
   iid: string;
   team?: string;
   channel: { id: string; name?: string; is_channel?: boolean; is_group?: boolean };

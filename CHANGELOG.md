@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.2.0 — 2026-08-07
 
 ### Added
 
@@ -14,6 +14,9 @@
   watched-channel messages update an unread footer without triggering an LLM
   turn or persisting Slack content.
 - `/slack inbox [N|clear]` and `/slack listen status|on|off` commands.
+- Direct `/slack download` and `/slack react` commands.
+- Bundled `slack-workflows` skill for progressive-disclosure guidance on
+  discovery, untrusted content, pagination, and reviewed writes.
 - Runtime dependencies on `@slack/socket-mode` and `undici`; Node.js 20.18.1
   or newer is required.
 
@@ -28,12 +31,24 @@
 - Incoming message events are acknowledged before local filtering, deduplicated,
   name-resolved with in-memory caches, and ordered by Slack timestamp. Own,
   bot, system, edited, deleted, private-channel, and DM events are ignored.
+- Operational `/slack` commands now call the shared Slack workspace directly,
+  without generating a user prompt or starting an LLM turn. TUI results use an
+  ephemeral viewer and enter the editor only after an explicit `e` action.
+- Tools and slash commands share one typed Slack workspace, transport seam,
+  metadata directory, result formatting path, and write-review policy.
+- Tool failures now throw through Pi's tool-error path instead of returning
+  successful-looking error text. Request cancellation reaches active Slack
+  requests, and pagination metadata is included in results.
+- User-token rotations are read immediately rather than after a process-local
+  cache expires. Downloaded filenames are normalised before writing to the
+  temporary directory.
+- Repository and install metadata now point at the maintained
+  `neilwashere/pi-slack-me` fork.
 
 ### Fixed
 
-- Tool-oriented `/slack` commands now send their generated instruction to the
-  agent instead of leaving it hidden in the input editor. Commands queue while
-  the agent is busy; `/slack inbox` remains editor-only for explicit review.
+- `/slack inbox` remains passive and editor-only, while operational slash
+  commands no longer mutate the editor or synthesize hidden agent prompts.
 - Successful non-JSON Slack responses now surface as `SlackApiError` rather
   than leaking a raw JSON parser exception.
 - Socket reconnects are owned by the extension with caught exponential-backoff

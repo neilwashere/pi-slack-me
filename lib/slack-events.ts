@@ -1,5 +1,7 @@
-import { slackGet } from "./api";
-import type { SlackChannel, SlackUser } from "./types";
+import {
+  createSlackDirectory,
+  type SlackDirectory,
+} from "./slack-workspace";
 
 const MAX_INBOX_MESSAGES = 100;
 const MAX_SEEN_EVENT_IDS = 1_000;
@@ -78,14 +80,11 @@ export interface SlackListenerStatus {
 
 export interface SlackEventListenerOptions {
   socket: SocketModeClientLike;
+  directory?: SlackDirectory;
   watchedChannels?: Iterable<string>;
   onStatusChange?: (status: SlackListenerStatus) => void;
   onMention?: (message: SlackInboxMessage) => void;
   onError?: (message: string) => void;
-}
-
-interface SlackAuthTestResponse {
-  user_id?: string;
 }
 
 interface SlackMessageEvent {
@@ -138,10 +137,7 @@ export class SlackEventListener {
   private readonly watchedChannels: Set<string>;
   private readonly seenEventIds = new Set<string>();
   private readonly seenEventOrder: string[] = [];
-  private readonly userNames = new Map<string, string>();
-  private readonly pendingUserNames = new Map<string, Promise<string>>();
-  private readonly channelNames = new Map<string, string>();
-  private readonly pendingChannelNames = new Map<string, Promise<string>>();
+  private readonly directory: SlackDirectory;
   private readonly inbox: StoredInboxMessage[] = [];
   private readonly onStatusChange?: (status: SlackListenerStatus) => void;
   private readonly onMention?: (message: SlackInboxMessage) => void;
@@ -159,6 +155,7 @@ export class SlackEventListener {
 
   constructor(options: SlackEventListenerOptions) {
     this.socket = options.socket;
+    this.directory = options.directory ?? createSlackDirectory();
     this.watchedChannels = new Set(options.watchedChannels ?? []);
     this.onStatusChange = options.onStatusChange;
     this.onMention = options.onMention;
@@ -317,11 +314,9 @@ export class SlackEventListener {
   private async connect(lifecycle: number): Promise<void> {
     try {
       if (!this.selfUserId) {
-        const auth = await slackGet<SlackAuthTestResponse>("auth.test");
+        const selfUserId = await this.directory.selfUserId();
         if (!this.desiredRunning || lifecycle !== this.lifecycle) return;
-        if (!auth.user_id)
-          throw new Error("Slack auth.test did not return user_id.");
-        this.selfUserId = auth.user_id;
+        this.selfUserId = selfUserId;
       }
       if (!this.desiredRunning || lifecycle !== this.lifecycle) return;
 
@@ -469,8 +464,8 @@ export class SlackEventListener {
     lifecycle: number,
   ): Promise<void> {
     const [userName, channelName] = await Promise.all([
-      this.resolveUserName(event.user),
-      this.resolveChannelName(event.channel),
+      this.directory.userName(event.user),
+      this.directory.channelName(event.channel),
     ]);
     if (!this.desiredRunning || lifecycle !== this.lifecycle) return;
 
@@ -513,63 +508,5 @@ export class SlackEventListener {
     } catch {
       // UI callbacks must not interrupt Socket Mode event processing.
     }
-  }
-
-  private resolveUserName(userId: string): Promise<string> {
-    return this.resolveName(
-      userId,
-      this.userNames,
-      this.pendingUserNames,
-      async () => {
-        const response = await slackGet<{ user?: SlackUser }>("users.info", {
-          query: { user: userId },
-        });
-        return (
-          response.user?.profile?.display_name ||
-          response.user?.profile?.real_name ||
-          response.user?.real_name ||
-          response.user?.name ||
-          userId
-        );
-      },
-    );
-  }
-
-  private resolveChannelName(channelId: string): Promise<string> {
-    return this.resolveName(
-      channelId,
-      this.channelNames,
-      this.pendingChannelNames,
-      async () => {
-        const response = await slackGet<{ channel?: SlackChannel }>(
-          "conversations.info",
-          { query: { channel: channelId } },
-        );
-        return response.channel?.name || channelId;
-      },
-    );
-  }
-
-  private resolveName(
-    id: string,
-    cache: Map<string, string>,
-    pending: Map<string, Promise<string>>,
-    lookup: () => Promise<string>,
-  ): Promise<string> {
-    const cached = cache.get(id);
-    if (cached !== undefined) return Promise.resolve(cached);
-
-    const active = pending.get(id);
-    if (active) return active;
-
-    const request = lookup()
-      .catch(() => id)
-      .then((name) => {
-        cache.set(id, name);
-        return name;
-      })
-      .finally(() => pending.delete(id));
-    pending.set(id, request);
-    return request;
   }
 }

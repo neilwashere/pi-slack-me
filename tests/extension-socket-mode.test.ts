@@ -42,6 +42,11 @@ interface TestCommand {
   handler: (args: string, context: TestContext) => Promise<void> | void;
 }
 
+interface TestTool {
+  name: string;
+  execute: (...args: unknown[]) => Promise<unknown>;
+}
+
 function slackResponse(body: Record<string, unknown>): Response {
   return new Response(JSON.stringify(body), {
     status: 200,
@@ -63,7 +68,7 @@ describe("Socket Mode extension lifecycle", () => {
     delete process.env.SLACK_LISTEN_CHANNELS;
   });
 
-  it("keeps inbox messages passive and dispatches tool commands to the agent", async () => {
+  it("keeps inbox messages passive and executes commands without an agent turn", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: string | URL | Request) => {
@@ -89,10 +94,13 @@ describe("Socket Mode extension lifecycle", () => {
 
     const hooks = new Map<string, Hook[]>();
     const commands = new Map<string, TestCommand>();
+    const tools = new Map<string, TestTool>();
     const sendUserMessage = vi.fn();
     const pi = {
       registerFlag: vi.fn(),
-      registerTool: vi.fn(),
+      registerTool: vi.fn((tool: TestTool) => {
+        tools.set(tool.name, tool);
+      }),
       registerCommand: vi.fn((name: string, command: TestCommand) => {
         commands.set(name, command);
       }),
@@ -114,7 +122,29 @@ describe("Socket Mode extension lifecycle", () => {
       },
     };
     const socket = new FakeSocketClient();
-    createSlackExtension({ createSocketClient: () => socket })(pi);
+    const channelsResult = {
+      title: "Slack channels",
+      text: "**Channels** (1):\n\n# **engineering** (CWATCHED)",
+      details: { operation: "list-channels" as const },
+    };
+    const directory = {
+      selfUserId: vi.fn().mockResolvedValue("USELF"),
+      userName: vi.fn().mockResolvedValue("Alice"),
+      channelName: vi.fn().mockResolvedValue("engineering"),
+    };
+    const workspace = {
+      execute: vi.fn().mockResolvedValue(channelsResult),
+      directory,
+    };
+    const presenter = {
+      present: vi.fn().mockResolvedValue(undefined),
+    };
+    createSlackExtension({
+      createSocketClient: () => socket,
+      workspace,
+      presenter,
+    })(pi);
+    expect(hooks.has("before_agent_start")).toBe(false);
 
     const startHook = hooks.get("session_start")?.[0];
     expect(startHook).toBeDefined();
@@ -141,6 +171,9 @@ describe("Socket Mode extension lifecycle", () => {
         "Slack: 1 unread",
       ),
     );
+    expect(directory.selfUserId).toHaveBeenCalledOnce();
+    expect(directory.userName).toHaveBeenCalledWith("UOTHER");
+    expect(directory.channelName).toHaveBeenCalledWith("CWATCHED");
 
     const command = commands.get("slack");
     expect(command).toBeDefined();
@@ -156,23 +189,50 @@ describe("Socket Mode extension lifecycle", () => {
     );
 
     await command?.handler("channels", context);
-    expect(sendUserMessage).toHaveBeenCalledOnce();
-    expect(sendUserMessage).toHaveBeenCalledWith(
-      "Call the slack_list_channels tool to list the public Slack channels you belong to.",
+    expect(workspace.execute).toHaveBeenCalledWith(
+      { operation: "list-channels" },
+      { signal: undefined },
     );
+    expect(presenter.present).toHaveBeenCalledWith(context, channelsResult);
+    expect(sendUserMessage).not.toHaveBeenCalled();
     expect(context.ui.setEditorText).toHaveBeenCalledOnce();
+
+    const listChannelsTool = tools.get("slack_list_channels");
+    expect(listChannelsTool).toBeDefined();
+    const signal = new AbortController().signal;
+    await listChannelsTool?.execute(
+      "call-id",
+      { types: "im" },
+      signal,
+      undefined,
+      context,
+    );
+    expect(workspace.execute).toHaveBeenNthCalledWith(
+      2,
+      { operation: "list-channels", types: "im" },
+      { signal },
+    );
 
     context.isIdle.mockReturnValue(false);
     await command?.handler("search deploy status", context);
-    expect(sendUserMessage).toHaveBeenNthCalledWith(
-      2,
-      'Call the slack_search tool with query="deploy status" to search Slack messages across the workspace.',
-      { deliverAs: "followUp" },
+    expect(workspace.execute).toHaveBeenNthCalledWith(
+      3,
+      { operation: "search", query: "deploy status" },
+      { signal: undefined },
     );
-    expect(context.ui.notify).toHaveBeenCalledWith(
+    expect(presenter.present).toHaveBeenNthCalledWith(2, context, channelsResult);
+    expect(sendUserMessage).not.toHaveBeenCalled();
+    expect(context.ui.notify).not.toHaveBeenCalledWith(
       "Slack command queued until the agent is idle.",
       "info",
     );
+
+    await command?.handler("wat", context);
+    expect(context.ui.notify).toHaveBeenCalledWith(
+      expect.stringContaining("Unknown Slack command"),
+      "warning",
+    );
+    expect(sendUserMessage).not.toHaveBeenCalled();
 
     const shutdownHook = hooks.get("session_shutdown")?.[0];
     expect(shutdownHook).toBeDefined();

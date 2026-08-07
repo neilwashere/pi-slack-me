@@ -2,7 +2,7 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { invokeWithCtx, firstText } from "./_helpers";
+import { invokeWithCtx, firstText, parseJsonRequestBody } from "./_helpers";
 import { setConfirmWriteEnabled } from "../lib/confirm";
 
 let tmpDir: string;
@@ -18,11 +18,12 @@ afterEach(() => {
   delete process.env.PI_CODING_AGENT_DIR;
   delete process.env.SLACK_USER_TOKEN;
   vi.unstubAllGlobals();
+  rmSync(tmpDir, { recursive: true, force: true });
 });
 
 function mockFetch(routes: Record<string, unknown>) {
   return vi.fn().mockImplementation((url: string) => {
-    const method = new URL(url).pathname.replace("/api/", "");
+    const method = url.split("/api/")[1]?.split("?")[0] ?? "";
     const body = routes[method];
     if (body === undefined) throw new Error(`unexpected Slack call: ${method}`);
     return Promise.resolve({
@@ -50,7 +51,9 @@ describe("slack_update_message", () => {
       await invokeWithCtx(updateMessageTool, { channel: "C1", ts: "100.0001", text: "draft" }, ctx),
     );
     expect(text).toContain("updated");
-    const sent = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string);
+    const sent = parseJsonRequestBody(
+      fetchMock.mock.calls[0][1] as RequestInit,
+    );
     expect(sent).toEqual({ channel: "C1", ts: "100.0001", text: "new" });
   });
 
@@ -79,10 +82,13 @@ describe("slack_update_message", () => {
     );
     const { ctx } = ctxWith({ editorResult: "x" });
     const { updateMessageTool } = await import("../lib/tools/update-message");
-    const text = firstText(
-      await invokeWithCtx(updateMessageTool, { channel: "C1", ts: "9", text: "x" }, ctx),
-    );
-    expect(text).toMatch(/only messages you authored|another user/);
+    await expect(
+      invokeWithCtx(
+        updateMessageTool,
+        { channel: "C1", ts: "9", text: "x" },
+        ctx,
+      ),
+    ).rejects.toThrow(/only messages (you authored|authored by)|another user/i);
   });
 
   it("reports a token/scope hint on an auth error (isAuthError branch)", async () => {
@@ -98,10 +104,13 @@ describe("slack_update_message", () => {
     );
     const { ctx } = ctxWith({ editorResult: "x" });
     const { updateMessageTool } = await import("../lib/tools/update-message");
-    const text = firstText(
-      await invokeWithCtx(updateMessageTool, { channel: "C1", ts: "9", text: "x" }, ctx),
-    );
-    expect(text).toMatch(/token.*invalid|chat:write|scope/i);
+    await expect(
+      invokeWithCtx(
+        updateMessageTool,
+        { channel: "C1", ts: "9", text: "x" },
+        ctx,
+      ),
+    ).rejects.toThrow(/token.*invalid|chat:write|scope/i);
   });
 
   it("skips the review when the flag is off", async () => {
@@ -112,7 +121,9 @@ describe("slack_update_message", () => {
     const { updateMessageTool } = await import("../lib/tools/update-message");
     await invokeWithCtx(updateMessageTool, { channel: "C1", ts: "1", text: "draft" }, ctx);
     expect(editor).not.toHaveBeenCalled();
-    const sent = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string);
+    const sent = parseJsonRequestBody(
+      fetchMock.mock.calls[0][1] as RequestInit,
+    );
     expect(sent.text).toBe("draft");
   });
 

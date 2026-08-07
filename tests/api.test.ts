@@ -118,6 +118,32 @@ describe("slackGet", () => {
     const { slackGet } = await import("../lib/api");
     await expect(slackGet("auth.test")).rejects.toThrow(/timed out|Network error/);
   });
+
+  it("propagates caller cancellation to the active request", async () => {
+    let requestSignal: AbortSignal | undefined;
+    let release: (() => void) | undefined;
+    const fetchMock = vi.fn(
+      (_url: string | URL | Request, init?: RequestInit) =>
+        new Promise<Response>((resolve, reject) => {
+          requestSignal = init?.signal as AbortSignal;
+          requestSignal.addEventListener("abort", () => {
+            reject(new DOMException("The operation was aborted", "AbortError"));
+          });
+          release = () => resolve(mockFetch({ ok: true })());
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const { slackGet } = await import("../lib/api");
+    const controller = new AbortController();
+    const pending = slackGet("auth.test", { signal: controller.signal });
+    await vi.waitFor(() => expect(requestSignal).toBeDefined());
+
+    controller.abort();
+    if (!requestSignal?.aborted) release?.();
+
+    expect(requestSignal?.aborted).toBe(true);
+    await expect(pending).rejects.toThrow(/cancelled/);
+  });
 });
 
 describe("slackDownload", () => {

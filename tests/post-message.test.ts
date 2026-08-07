@@ -2,7 +2,7 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { invokeWithCtx, firstText } from "./_helpers";
+import { invokeWithCtx, firstText, parseJsonRequestBody } from "./_helpers";
 import { setConfirmWriteEnabled, setAllowHeadlessWriteEnabled } from "../lib/confirm";
 
 // Write-tool tests. Each tool reads a tool-execution ctx (5th arg) for the
@@ -22,14 +22,14 @@ afterEach(() => {
   delete process.env.PI_CODING_AGENT_DIR;
   delete process.env.SLACK_USER_TOKEN;
   vi.unstubAllGlobals();
+  rmSync(tmpDir, { recursive: true, force: true });
 });
 
 // POST-aware fetch mock: routes by Slack method derived from the URL path.
 // Captures the JSON body so tests can assert what was actually sent.
 function mockFetch(routes: Record<string, unknown>) {
-  return vi.fn().mockImplementation((url: string, init?: RequestInit) => {
-    const u = new URL(url);
-    const method = u.pathname.replace("/api/", "");
+  return vi.fn().mockImplementation((url: string) => {
+    const method = url.split("/api/")[1]?.split("?")[0] ?? "";
     const body = routes[method];
     if (body === undefined) throw new Error(`unexpected Slack call: ${method}`);
     return Promise.resolve({
@@ -60,8 +60,9 @@ describe("slack_post_message", () => {
   it("requires channel or to_user", async () => {
     const { ctx } = ctxWith({ editorResult: "x" });
     const { postMessageTool } = await import("../lib/tools/post-message");
-    const text = firstText(await invokeWithCtx(postMessageTool, { text: "hi" }, ctx));
-    expect(text).toMatch(/channel.*to_user|required/);
+    await expect(
+      invokeWithCtx(postMessageTool, { text: "hi" }, ctx),
+    ).rejects.toThrow(/channel.*to_user|required/);
   });
 
   it("REJECTS when both channel and to_user are set (no silent precedence)", async () => {
@@ -69,10 +70,13 @@ describe("slack_post_message", () => {
     vi.stubGlobal("fetch", fetchMock);
     const { ctx } = ctxWith({ editorResult: "x" });
     const { postMessageTool } = await import("../lib/tools/post-message");
-    const text = firstText(
-      await invokeWithCtx(postMessageTool, { channel: "C1", to_user: "U9", text: "hi" }, ctx),
-    );
-    expect(text).toMatch(/channel.*OR.*to_user|not both/i);
+    await expect(
+      invokeWithCtx(
+        postMessageTool,
+        { channel: "C1", to_user: "U9", text: "hi" },
+        ctx,
+      ),
+    ).rejects.toThrow(/channel.*OR.*to_user|not both/i);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -87,7 +91,9 @@ describe("slack_post_message", () => {
     // The editor opened with the drafted text.
     expect(editor).toHaveBeenCalledWith(expect.any(String), "draft");
     // The POST body used the EDITED text, not the draft.
-    const sent = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string);
+    const sent = parseJsonRequestBody(
+      fetchMock.mock.calls[0][1] as RequestInit,
+    );
     expect(sent).toEqual({ channel: "C1", text: "final text" });
   });
 
@@ -97,7 +103,9 @@ describe("slack_post_message", () => {
     const { ctx } = ctxWith({ editorResult: "as-is" });
     const { postMessageTool } = await import("../lib/tools/post-message");
     await invokeWithCtx(postMessageTool, { channel: "C1", text: "as-is" }, ctx);
-    const sent = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string);
+    const sent = parseJsonRequestBody(
+      fetchMock.mock.calls[0][1] as RequestInit,
+    );
     expect(sent.text).toBe("as-is");
   });
 
@@ -122,7 +130,7 @@ describe("slack_post_message", () => {
     const text = firstText(await invokeWithCtx(postMessageTool, { to_user: "U9", text: "hey" }, ctx));
     expect(text).toContain("@U9");
     expect(text).toContain("D77");
-    const sent = JSON.parse((fetchMock.mock.calls[1][1] as RequestInit).body as string);
+    const sent = parseJsonRequestBody(fetchMock.mock.calls[1][1] as RequestInit);
     expect(sent).toEqual({ channel: "D77", text: "hey" });
   });
 
@@ -135,7 +143,9 @@ describe("slack_post_message", () => {
       await invokeWithCtx(postMessageTool, { channel: "C1", thread_ts: "100.0001", text: "reply" }, ctx),
     );
     expect(text).toMatch(/threaded reply/);
-    const sent = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string);
+    const sent = parseJsonRequestBody(
+      fetchMock.mock.calls[0][1] as RequestInit,
+    );
     expect(sent.thread_ts).toBe("100.0001");
   });
 
@@ -148,7 +158,9 @@ describe("slack_post_message", () => {
     await invokeWithCtx(postMessageTool, { channel: "C1", text: "draft" }, ctx);
     expect(editor).not.toHaveBeenCalled();
     // Draft text is sent as-is (no edit step).
-    const sent = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string);
+    const sent = parseJsonRequestBody(
+      fetchMock.mock.calls[0][1] as RequestInit,
+    );
     expect(sent.text).toBe("draft");
   });
 
@@ -176,7 +188,9 @@ describe("slack_post_message", () => {
     const text = firstText(await invokeWithCtx(postMessageTool, { channel: "C1", text: "draft" }, ctx));
     expect(text).toContain("C1");
     expect(editor).not.toHaveBeenCalled();
-    const sent = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string);
+    const sent = parseJsonRequestBody(
+      fetchMock.mock.calls[0][1] as RequestInit,
+    );
     expect(sent.text).toBe("draft");
   });
 
@@ -191,8 +205,9 @@ describe("slack_post_message", () => {
     vi.stubGlobal("fetch", fetchMock);
     const { ctx } = ctxWith({ editorResult: "x" });
     const { postMessageTool } = await import("../lib/tools/post-message");
-    const text = firstText(await invokeWithCtx(postMessageTool, { channel: "C1", text: "x" }, ctx));
-    expect(text).toMatch(/chat:write|token/);
+    await expect(
+      invokeWithCtx(postMessageTool, { channel: "C1", text: "x" }, ctx),
+    ).rejects.toThrow(/invalid_auth|token/);
   });
 
   it("DM resolution failure (missing_scope on conversations.open) names im:write, not chat:write", async () => {
@@ -208,8 +223,8 @@ describe("slack_post_message", () => {
     vi.stubGlobal("fetch", fetchMock);
     const { ctx } = ctxWith({ editorResult: "hey" });
     const { postMessageTool } = await import("../lib/tools/post-message");
-    const text = firstText(await invokeWithCtx(postMessageTool, { to_user: "U9", text: "hey" }, ctx));
-    expect(text).toContain("im:write");
-    expect(text).not.toMatch(/chat:write is required/);
+    await expect(
+      invokeWithCtx(postMessageTool, { to_user: "U9", text: "hey" }, ctx),
+    ).rejects.toThrow(/im:write/);
   });
 });

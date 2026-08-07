@@ -1,7 +1,5 @@
-// Slack auth. Per project decision: this extension acts as YOU, not as a bot.
-// Read SLACK_USER_TOKEN (xoxp-...) from the environment ONLY. No file fallback,
-// no bot token path, no keyring. The token is opaque - never logged, echoed,
-// or redacted anywhere.
+// Slack authentication accepts only the user token in SLACK_USER_TOKEN. The
+// token is never logged or included in errors.
 //
 // Creating the token: api.slack.com/apps &rarr; create app &rarr; OAuth & Permissions
 // &rarr; User Token Scopes &rarr; Install to workspace &rarr; copy the xoxp- value.
@@ -22,23 +20,9 @@ export class SlackAuthError extends Error {
   }
 }
 
-// Returns the user token or throws. Caches the lookup so we do not re-read the
-// environment on every tool call.
-let cachedToken: string | undefined;
-let cachedAt = 0;
-const CACHE_MS = 60_000;
-
 export function getSlackToken(): string {
-  const now = Date.now();
-  if (cachedToken && now - cachedAt < CACHE_MS) return cachedToken;
   const token = process.env.SLACK_USER_TOKEN?.trim();
-  if (!token) {
-    cachedToken = undefined;
-    cachedAt = now;
-    throw new SlackAuthError();
-  }
-  cachedToken = token;
-  cachedAt = now;
+  if (!token) throw new SlackAuthError();
   return token;
 }
 
@@ -47,10 +31,4 @@ export function getSlackToken(): string {
 // SlackAuthError surfaces).
 export function hasSlackToken(): boolean {
   return Boolean(process.env.SLACK_USER_TOKEN?.trim());
-}
-
-// Wipe the cached token. Useful in tests; no production code path calls this.
-export function _resetAuthCache(): void {
-  cachedToken = undefined;
-  cachedAt = 0;
 }

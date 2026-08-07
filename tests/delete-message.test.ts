@@ -2,7 +2,7 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { invokeWithCtx, firstText } from "./_helpers";
+import { invokeWithCtx, firstText, parseJsonRequestBody } from "./_helpers";
 import { setConfirmWriteEnabled } from "../lib/confirm";
 
 let tmpDir: string;
@@ -18,11 +18,12 @@ afterEach(() => {
   delete process.env.PI_CODING_AGENT_DIR;
   delete process.env.SLACK_USER_TOKEN;
   vi.unstubAllGlobals();
+  rmSync(tmpDir, { recursive: true, force: true });
 });
 
 function mockFetch(routes: Record<string, unknown>) {
   return vi.fn().mockImplementation((url: string) => {
-    const method = new URL(url).pathname.replace("/api/", "");
+    const method = url.split("/api/")[1]?.split("?")[0] ?? "";
     const body = routes[method];
     if (body === undefined) throw new Error(`unexpected Slack call: ${method}`);
     return Promise.resolve({
@@ -51,7 +52,9 @@ describe("slack_delete_message", () => {
     );
     expect(text).toContain("deleted");
     expect(confirm).toHaveBeenCalledOnce();
-    const sent = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string);
+    const sent = parseJsonRequestBody(
+      fetchMock.mock.calls[0][1] as RequestInit,
+    );
     expect(sent).toEqual({ channel: "C1", ts: "100.0001" });
   });
 
@@ -106,9 +109,8 @@ describe("slack_delete_message", () => {
     );
     const { ctx } = ctxWith({ confirmResult: true });
     const { deleteMessageTool } = await import("../lib/tools/delete-message");
-    const text = firstText(
-      await invokeWithCtx(deleteMessageTool, { channel: "C1", ts: "9" }, ctx),
-    );
-    expect(text).toMatch(/token.*invalid|revoked|chat:write|scope/i);
+    await expect(
+      invokeWithCtx(deleteMessageTool, { channel: "C1", ts: "9" }, ctx),
+    ).rejects.toThrow(/token.*invalid|revoked|chat:write|scope/i);
   });
 });

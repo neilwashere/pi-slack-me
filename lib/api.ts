@@ -15,14 +15,58 @@ import { getSlackToken } from "./auth";
 const SLACK_BASE_URL = "https://slack.com/api";
 const REQUEST_TIMEOUT_MS = 30_000;
 
+type AbortCause = "cancelled" | "timeout" | undefined;
+
+interface RequestAbort {
+  signal: AbortSignal;
+  cause(): AbortCause;
+  dispose(): void;
+}
+
+function createRequestAbort(external?: AbortSignal): RequestAbort {
+  const controller = new AbortController();
+  let cause: AbortCause;
+  const cancel = () => {
+    if (cause) return;
+    cause = "cancelled";
+    controller.abort(external?.reason);
+  };
+  if (external?.aborted) {
+    cancel();
+  } else {
+    external?.addEventListener("abort", cancel, { once: true });
+  }
+  const timer = setTimeout(() => {
+    if (cause) return;
+    cause = "timeout";
+    controller.abort();
+  }, REQUEST_TIMEOUT_MS);
+  timer.unref();
+
+  return {
+    signal: controller.signal,
+    cause: () => cause,
+    dispose: () => {
+      clearTimeout(timer);
+      external?.removeEventListener("abort", cancel);
+    },
+  };
+}
+
 export interface SlackGetOptions {
   query?: Record<string, string | number | boolean | undefined>;
+  signal?: AbortSignal;
 }
 
 export interface SlackPostOptions {
   /** JSON body. Slack accepts application/json for write methods. */
   body?: Record<string, unknown>;
   query?: Record<string, string | number | boolean | undefined>;
+  signal?: AbortSignal;
+}
+
+export interface SlackDownloadOptions {
+  signal?: AbortSignal;
 }
 
 // Error carrying the Slack `error` code, HTTP status, and an optional
@@ -133,50 +177,53 @@ async function readSlackJson<T = SlackResponse>(
   return parsed as T;
 }
 
+async function requestSlackJson<T>(
+  method: string,
+  url: string,
+  init: Omit<RequestInit, "signal">,
+  externalSignal?: AbortSignal,
+): Promise<T> {
+  const abort = createRequestAbort(externalSignal);
+  try {
+    const response = await fetch(url, { ...init, signal: abort.signal });
+    return await readSlackJson<T>(method, response);
+  } catch (err) {
+    if (err instanceof SlackApiError) throw err;
+    throw new SlackApiError(transportError(method, err, abort.cause()));
+  } finally {
+    abort.dispose();
+  }
+}
+
 // Call a Slack Web API method via GET. Returns the full parsed JSON body
 // (Slack wraps results in {ok, ...}); callers read the fields they need and
 // can grab response_metadata.next_cursor for pagination. Throws SlackApiError
 // on transport failure, non-2xx HTTP, or a logical {ok:false} body.
-export async function slackGet<T = SlackResponse>(
+export function slackGet<T = SlackResponse>(
   method: string,
   options: SlackGetOptions = {},
 ): Promise<T> {
   const token = getSlackToken();
-  const url = buildUrl(method, options.query);
-
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-
-  let response: Response;
-  try {
-    response = await fetch(url, {
+  return requestSlackJson<T>(
+    method,
+    buildUrl(method, options.query),
+    {
       method: "GET",
       headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
-      signal: controller.signal,
-    });
-  } catch (err) {
-    clearTimeout(timer);
-    throw new SlackApiError(transportError(method, err));
-  }
-
-  try {
-    return await readSlackJson<T>(method, response);
-  } finally {
-    clearTimeout(timer);
-  }
+    },
+    options.signal,
+  );
 }
 
 // Call a Slack Web API method via POST with a JSON body. Used by the write
 // tools (chat.postMessage / chat.update / chat.delete). Same response parsing
 // and error handling as slackGet. `body` is sent as application/json; Slack
 // accepts JSON for all write methods.
-export async function slackPost<T = SlackResponse>(
+export function slackPost<T = SlackResponse>(
   method: string,
   options: SlackPostOptions = {},
 ): Promise<T> {
   const token = getSlackToken();
-  const url = buildUrl(method, options.query);
-
   const headers: Record<string, string> = {
     Authorization: `Bearer ${token}`,
     Accept: "application/json",
@@ -186,40 +233,26 @@ export async function slackPost<T = SlackResponse>(
     headers["Content-Type"] = "application/json; charset=utf-8";
     body = JSON.stringify(options.body);
   }
-
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-
-  let response: Response;
-  try {
-    response = await fetch(url, {
-      method: "POST",
-      headers,
-      body,
-      signal: controller.signal,
-    });
-  } catch (err) {
-    clearTimeout(timer);
-    throw new SlackApiError(transportError(method, err));
-  }
-
-  try {
-    return await readSlackJson<T>(method, response);
-  } finally {
-    clearTimeout(timer);
-  }
+  return requestSlackJson<T>(
+    method,
+    buildUrl(method, options.query),
+    { method: "POST", headers, body },
+    options.signal,
+  );
 }
 
 // Fetch a binary file from a url_private URL with token auth. Returns the
 // raw ArrayBuffer. Used by the file download tool for images and documents.
-export async function slackDownload(url: string): Promise<ArrayBuffer> {
+export async function slackDownload(
+  url: string,
+  options: SlackDownloadOptions = {},
+): Promise<ArrayBuffer> {
   const token = getSlackToken();
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const abort = createRequestAbort(options.signal);
   try {
     const response = await fetch(url, {
       headers: { Authorization: `Bearer ${token}` },
-      signal: controller.signal,
+      signal: abort.signal,
     });
     if (!response.ok) {
       throw new SlackApiError(
@@ -230,17 +263,24 @@ export async function slackDownload(url: string): Promise<ArrayBuffer> {
     return await response.arrayBuffer();
   } catch (err) {
     if (err instanceof SlackApiError) throw err;
-    throw new SlackApiError(transportError("file download", err));
+    throw new SlackApiError(
+      transportError("file download", err, abort.cause()),
+    );
   } finally {
-    clearTimeout(timer);
+    abort.dispose();
   }
 }
 
 // Classify a fetch() throw (network error or abort/timeout) into a readable
 // message. Shared by slackGet / slackPost / slackDownload.
-function transportError(method: string, err: unknown): string {
+function transportError(
+  method: string,
+  err: unknown,
+  cause?: AbortCause,
+): string {
+  if (cause === "cancelled") return `Slack ${method} request cancelled.`;
   const msg = err instanceof Error ? err.message : String(err);
-  if (msg.includes("abort")) {
+  if (cause === "timeout" || msg.toLowerCase().includes("abort")) {
     return `Slack ${method} timed out after ${REQUEST_TIMEOUT_MS / 1000}s.`;
   }
   return `Network error reaching Slack (${method}): ${msg}`;

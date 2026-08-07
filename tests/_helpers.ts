@@ -55,3 +55,18 @@ export function firstText(result: AgentToolResult<unknown>): string {
   if (!part || part.type !== "text") return "";
   return part.text;
 }
+
+export function parseJsonRequestBody(init: RequestInit): Record<string, unknown> {
+  if (typeof init.body !== "string") {
+    throw new Error("Expected a JSON request body.");
+  }
+  try {
+    const value: unknown = JSON.parse(init.body);
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      throw new Error("Expected the JSON request body to be an object.");
+    }
+    return value as Record<string, unknown>;
+  } catch (error) {
+    throw new Error("Could not parse the JSON request body.", { cause: error });
+  }
+}

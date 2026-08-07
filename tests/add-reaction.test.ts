@@ -54,14 +54,12 @@ describe("slack_add_reaction", () => {
     );
 
     const { addReactionTool } = await import("../lib/tools/add-reaction");
-    const text = firstText(
-      await invoke(addReactionTool, {
+    await expect(
+      invoke(addReactionTool, {
         channel: "C123",
         name: "eyes",
         timestamp: "1786019860.190939",
       }),
-    );
-
-    expect(text).toContain("reactions:write");
+    ).rejects.toThrow(/reactions:write/);
   });
 });

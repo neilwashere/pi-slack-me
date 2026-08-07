@@ -1,7 +1,10 @@
 import { Type, type Static } from "typebox";
 import type { AgentToolResult, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { slackPost } from "../api";
-import { errorText, toToolResult, type SlackDetails } from "../result";
+import { toToolResult, type SlackDetails } from "../result";
+import {
+  createSlackWorkspace,
+  type SlackWorkspace,
+} from "../slack-workspace";
 import {
   ADD_REACTION_CHANNEL_DESCRIPTION,
   ADD_REACTION_DESCRIPTION,
@@ -16,32 +19,31 @@ const Params = Type.Object({
   timestamp: Type.String({ description: ADD_REACTION_TIMESTAMP_DESCRIPTION, minLength: 1 }),
 });
 
-interface ReactionAddResponse {
-  ok: boolean;
-}
-
-export const addReactionTool: ToolDefinition<typeof Params, undefined> = {
-  name: "slack_add_reaction",
-  label: ADD_REACTION_TITLE,
-  description: ADD_REACTION_DESCRIPTION,
-  parameters: Params,
-  async execute(
-    _toolCallId: string,
-    params: Static<typeof Params>,
-  ): Promise<AgentToolResult<SlackDetails>> {
-    try {
-      await slackPost<ReactionAddResponse>("reactions.add", {
-        body: {
+export function createAddReactionTool(
+  workspace: SlackWorkspace,
+): ToolDefinition<typeof Params, SlackDetails> {
+  return {
+    name: "slack_add_reaction",
+    label: ADD_REACTION_TITLE,
+    description: ADD_REACTION_DESCRIPTION,
+    parameters: Params,
+    async execute(
+      _toolCallId: string,
+      params: Static<typeof Params>,
+      signal,
+    ): Promise<AgentToolResult<SlackDetails>> {
+      const result = await workspace.execute(
+        {
+          operation: "add-reaction",
           channel: params.channel,
           name: params.name,
           timestamp: params.timestamp,
         },
-      });
-      return toToolResult(
-        `Slack: added :${params.name}: reaction to message ${params.timestamp} in ${params.channel}.`,
+        { signal },
       );
-    } catch (err) {
-      return toToolResult(errorText(err));
-    }
-  },
-};
+      return toToolResult(result.text, result.details);
+    },
+  };
+}
+
+export const addReactionTool = createAddReactionTool(createSlackWorkspace());

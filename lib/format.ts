@@ -1,27 +1,23 @@
-// Compact, line-oriented formatters. Every Slack tool renders its payload to a
-// short text string: one line per message, one line per channel, etc. This is
-// the primary context-pollution control - the agent reads summarized prose,
-// not raw Slack JSON.
-//
-// User IDs are resolved to display names before rendering (see resolveUserNames)
-// so feedback shows authors, not U... literals.
+// Compact, line-oriented output keeps Slack payloads readable without placing
+// raw response envelopes into agent context.
 
 import type {
   SlackChannel,
   SlackFileInfo,
   SlackMessage,
-  SlackSearchMatch,
   SlackSearchResult,
 } from "./types";
-import { resolveUserNames } from "./users";
 
 // channels ---------------------------------------------------------------
 
-export function formatChannelList(channels: SlackChannel[]): string {
+export function formatChannelList(
+  channels: SlackChannel[],
+  nextCursor?: string,
+): string {
   if (channels.length === 0) return "No channels found.";
 
   const lines = channels.map((ch) => {
-    const marker = ch.is_im ? "✉️" : ch.is_mpim ? "👥" : ch.is_private ? "🔒" : "#";
+    const marker = channelMarker(ch);
     const name = ch.is_im ? `DM with ${ch.user ?? "?"}` : ch.name;
     const members =
       typeof ch.num_members === "number" ? ` · ${ch.num_members} members` : "";
@@ -29,7 +25,15 @@ export function formatChannelList(channels: SlackChannel[]): string {
     return `${marker} **${name}** (${ch.id})${members}${topic}`;
   });
 
-  return `**Channels** (${channels.length}):\n\n${lines.join("\n")}`;
+  const pagination = nextCursor ? `\n\nNext cursor: \`${nextCursor}\`` : "";
+  return `**Channels** (${channels.length}):\n\n${lines.join("\n")}${pagination}`;
+}
+
+function channelMarker(channel: SlackChannel): string {
+  if (channel.is_im) return "✉️";
+  if (channel.is_mpim) return "👥";
+  if (channel.is_private) return "🔒";
+  return "#";
 }
 
 // messages ----------------------------------------------------------------
@@ -43,16 +47,22 @@ function formatTimestamp(ts: string): string {
     .replace(/\.\d{3}Z$/, " UTC");
 }
 
-// Format a list of messages once author names are known. names[i] aligns with
-// messages[i]. Public so the download-file tool can reuse the single-message
-// path, but callers normally go through formatMessages / formatThread which
-// resolve names internally.
-export function formatMessagesWithNames(
-  messages: SlackMessage[],
-  names: string[],
-  title: string,
-  hasMore?: boolean,
-): string {
+interface MessageFormatOptions {
+  messages: SlackMessage[];
+  names: string[];
+  title: string;
+  hasMore?: boolean;
+  nextCursor?: string;
+}
+
+// names[i] identifies messages[i]; callers resolve names before rendering.
+export function formatMessagesWithNames({
+  messages,
+  names,
+  title,
+  hasMore,
+  nextCursor,
+}: MessageFormatOptions): string {
   if (messages.length === 0) return `${title}: no messages found.`;
 
   const header = `**${title}** (${messages.length}${hasMore ? ", more available" : ""}):`;
@@ -69,48 +79,19 @@ export function formatMessagesWithNames(
     return `[${time}] **${author}**${thread}: ${msg.text ?? ""}${reactions}${files}`;
   });
 
-  return `${header}\n\n${lines.join("\n\n")}`;
-}
-
-export async function formatMessages(
-  messages: SlackMessage[],
-  channelId: string,
-  hasMore?: boolean,
-): Promise<string> {
-  const names = await resolveUserNames(
-    messages.map((m) => m.user ?? "unknown"),
-  );
-  return formatMessagesWithNames(messages, names, `Messages in ${channelId}`, hasMore);
-}
-
-export async function formatThread(
-  messages: SlackMessage[],
-  channelId: string,
-  threadTs: string,
-  hasMore?: boolean,
-): Promise<string> {
-  const names = await resolveUserNames(
-    messages.map((m) => m.user ?? "unknown"),
-  );
-  return formatMessagesWithNames(
-    messages,
-    names,
-    `Thread ${threadTs} in ${channelId}`,
-    hasMore,
-  );
+  const pagination = nextCursor ? `\n\nNext cursor: \`${nextCursor}\`` : "";
+  return `${header}\n\n${lines.join("\n\n")}${pagination}`;
 }
 
 // search ------------------------------------------------------------------
 
-export async function formatSearchResults(
+export function formatSearchResultsWithNames(
   result: SlackSearchResult,
   query: string,
-): Promise<string> {
+  names: string[],
+): string {
   if (result.matches.length === 0) return `No results found for "${query}".`;
 
-  const names = await resolveUserNames(
-    result.matches.map((m) => m.user ?? "unknown"),
-  );
   const header = `**Search results** for "${query}" (${result.matches.length} of ${result.total} total):`;
   const lines = result.matches.map((m, i) => {
     const time = formatTimestamp(m.ts);
@@ -124,7 +105,7 @@ export async function formatSearchResults(
 
 // files -------------------------------------------------------------------
 
-export function formatFileSize(bytes?: number): string {
+function formatFileSize(bytes?: number): string {
   if (typeof bytes !== "number") return "unknown size";
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;

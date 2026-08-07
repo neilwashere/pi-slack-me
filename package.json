@@ -1,7 +1,7 @@
 {
   "name": "@estebanforge/pi-slack-me",
-  "version": "1.1.1",
-  "description": "Slack tools for Pi that act as YOU, not as a bot. Adds 9 LLM-callable tools using a Slack user token, plus an opt-in passive Socket Mode inbox for public-channel messages. No bot to invite and no automatic LLM triggers.",
+  "version": "1.2.0",
+  "description": "Slack tools and direct commands for Pi that act as YOU, not as a bot, with reviewed writes and an opt-in passive Socket Mode inbox.",
   "keywords": [
     "pi-package",
     "pi-extension",
@@ -20,8 +20,14 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/EstebanForge/pi-slack-me.git"
+    "url": "git+https://github.com/neilwashere/pi-slack-me.git"
   },
+  "maintainers": [
+    {
+      "name": "neilwashere",
+      "url": "https://github.com/neilwashere"
+    }
+  ],
   "publishConfig": {
     "access": "public"
   },
@@ -38,6 +44,7 @@
   "files": [
     "extensions",
     "lib",
+    "skills",
     "tests",
     "vitest.config.ts",
     "README.md"
@@ -45,6 +52,9 @@
   "pi": {
     "extensions": [
       "./extensions"
+    ],
+    "skills": [
+      "./skills"
     ]
   },
   "peerDependencies": {

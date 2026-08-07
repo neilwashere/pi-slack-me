@@ -41,15 +41,12 @@ describe("getSlackToken", () => {
     expect(() => getSlackToken()).toThrow(SlackAuthError);
   });
 
-  it("_resetAuthCache wipes the cache so re-evaluating env takes effect", async () => {
+  it("reads token rotations from the environment immediately", async () => {
     process.env.SLACK_USER_TOKEN = "first";
-    const mod = await import("../lib/auth");
-    expect(mod.getSlackToken()).toBe("first");
+    const { getSlackToken } = await import("../lib/auth");
+    expect(getSlackToken()).toBe("first");
     process.env.SLACK_USER_TOKEN = "second";
-    // Cache hit returns the first value if not reset.
-    expect(mod.getSlackToken()).toBe("first");
-    mod._resetAuthCache();
-    expect(mod.getSlackToken()).toBe("second");
+    expect(getSlackToken()).toBe("second");
   });
 
   it("hasSlackToken tracks env presence without throwing", async () => {
