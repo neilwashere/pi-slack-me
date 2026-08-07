@@ -183,10 +183,9 @@ function registerSlackMe(
     ctx.ui.setStatus(SLACK_LISTENER_STATUS_KEY, undefined);
   });
 
-  // /slack <verb> - prefix the editor with an explicit instruction so the
-  // agent reaches for the right tool deterministically. The command cannot
-  // directly dispatch a tool call, so it sets the editor text and the user
-  // hits Enter to run. Same prefill pattern as pi-asana.
+  // Tool-oriented verbs send an explicit user message so the agent reaches
+  // for the intended Slack tool deterministically. Inbox contents are the
+  // exception: untrusted Slack text stays in the editor for user review.
   //
   //   /slack channels [types]      -> slack_list_channels
   //   /slack dms                    -> slack_list_channels (types=im)
@@ -400,6 +399,10 @@ function registerSlackMe(
             return;
           }
           ctx.ui.setEditorText(formatInboxPrompt(messages));
+          ctx.ui.notify(
+            "Slack inbox loaded into the input editor. Review it, then press Enter to send it to the agent.",
+            "info",
+          );
           return;
         }
         case "listen": {
@@ -490,7 +493,17 @@ function registerSlackMe(
           break;
       }
 
-      if (prompt) ctx.ui.setEditorText(prompt);
+      if (prompt) {
+        if (ctx.isIdle()) {
+          pi.sendUserMessage(prompt);
+        } else {
+          pi.sendUserMessage(prompt, { deliverAs: "followUp" });
+          ctx.ui.notify(
+            "Slack command queued until the agent is idle.",
+            "info",
+          );
+        }
+      }
     },
   });
 }

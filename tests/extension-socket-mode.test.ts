@@ -25,6 +25,7 @@ class FakeSocketClient {
 interface TestContext {
   hasUI: boolean;
   mode: "tui";
+  isIdle: ReturnType<typeof vi.fn>;
   ui: {
     notify: ReturnType<typeof vi.fn>;
     setStatus: ReturnType<typeof vi.fn>;
@@ -62,7 +63,7 @@ describe("Socket Mode extension lifecycle", () => {
     delete process.env.SLACK_LISTEN_CHANNELS;
   });
 
-  it("starts with the session, fills the passive inbox, and stops on shutdown", async () => {
+  it("keeps inbox messages passive and dispatches tool commands to the agent", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: string | URL | Request) => {
@@ -105,6 +106,7 @@ describe("Socket Mode extension lifecycle", () => {
     const context: TestContext = {
       hasUI: true,
       mode: "tui",
+      isIdle: vi.fn().mockReturnValue(true),
       ui: {
         notify: vi.fn(),
         setStatus: vi.fn(),
@@ -148,6 +150,29 @@ describe("Socket Mode extension lifecycle", () => {
     expect(editorText).toContain("untrusted external content");
     expect(editorText).toContain('"text": "<@USELF> hello from Slack"');
     expect(sendUserMessage).not.toHaveBeenCalled();
+    expect(context.ui.notify).toHaveBeenCalledWith(
+      "Slack inbox loaded into the input editor. Review it, then press Enter to send it to the agent.",
+      "info",
+    );
+
+    await command?.handler("channels", context);
+    expect(sendUserMessage).toHaveBeenCalledOnce();
+    expect(sendUserMessage).toHaveBeenCalledWith(
+      "Call the slack_list_channels tool to list the public Slack channels you belong to.",
+    );
+    expect(context.ui.setEditorText).toHaveBeenCalledOnce();
+
+    context.isIdle.mockReturnValue(false);
+    await command?.handler("search deploy status", context);
+    expect(sendUserMessage).toHaveBeenNthCalledWith(
+      2,
+      'Call the slack_search tool with query="deploy status" to search Slack messages across the workspace.',
+      { deliverAs: "followUp" },
+    );
+    expect(context.ui.notify).toHaveBeenCalledWith(
+      "Slack command queued until the agent is idle.",
+      "info",
+    );
 
     const shutdownHook = hooks.get("session_shutdown")?.[0];
     expect(shutdownHook).toBeDefined();

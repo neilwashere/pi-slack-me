@@ -174,19 +174,21 @@ Requires Node.js 20.18.1 or newer (the minimum supported by the Socket Mode tran
 
 ## Commands
 
+Tool-oriented commands immediately send an instruction to the agent, or queue it when the agent is busy. `/slack inbox` is deliberately different: it places untrusted Slack content in the editor for review and requires you to press Enter.
+
 | Command | Description |
 | --- | --- |
 | `/slack` | Show token status and usage |
-| `/slack channels [types]` | List public channels by default, or the requested conversation types |
-| `/slack dms` | List your DMs (prefills `slack_list_channels` with `types=im`) |
-| `/slack read <channel> [N]` | Read recent messages (prefills `slack_read_messages`) |
-| `/slack thread <channel> <ts>` | Read a thread (prefills `slack_read_thread`) |
-| `/slack search <query>` | Search messages (prefills `slack_search`) |
-| `/slack post <channel> <text>` | Post a message (prefills `slack_post_message`) |
-| `/slack dm <user> <text>` | DM a user by ID (prefills `slack_post_message` with `to_user`) |
-| `/slack reply <channel> <ts> <text>` | Reply in a thread (prefills `slack_post_message` with `thread_ts`) |
-| `/slack edit <channel> <ts> <text>` | Edit your message (prefills `slack_update_message`) |
-| `/slack delete <channel> <ts>` | Delete your message (prefills `slack_delete_message`) |
+| `/slack channels [types]` | Ask the agent to list public channels by default, or the requested conversation types |
+| `/slack dms` | Ask the agent to list your DMs with `slack_list_channels` |
+| `/slack read <channel> [N]` | Ask the agent to read recent messages with `slack_read_messages` |
+| `/slack thread <channel> <ts>` | Ask the agent to read a thread with `slack_read_thread` |
+| `/slack search <query>` | Ask the agent to search messages with `slack_search` |
+| `/slack post <channel> <text>` | Ask the agent to post with `slack_post_message` |
+| `/slack dm <user> <text>` | Ask the agent to DM a user with `slack_post_message` |
+| `/slack reply <channel> <ts> <text>` | Ask the agent to reply with `slack_post_message` |
+| `/slack edit <channel> <ts> <text>` | Ask the agent to edit with `slack_update_message` |
+| `/slack delete <channel> <ts>` | Ask the agent to delete with `slack_delete_message` |
 | `/slack inbox [N]` | Place the latest 1-100 retained messages in the editor without submitting them |
 | `/slack inbox clear` | Empty the in-memory inbox |
 | `/slack listen status\|on\|off` | Inspect or control the session's Socket Mode connection |

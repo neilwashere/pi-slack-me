@@ -31,6 +31,9 @@
 
 ### Fixed
 
+- Tool-oriented `/slack` commands now send their generated instruction to the
+  agent instead of leaving it hidden in the input editor. Commands queue while
+  the agent is busy; `/slack inbox` remains editor-only for explicit review.
 - Successful non-JSON Slack responses now surface as `SlackApiError` rather
   than leaking a raw JSON parser exception.
 - Socket reconnects are owned by the extension with caught exponential-backoff
