@@ -78,7 +78,9 @@ class SlackResultView extends VStack {
       return;
     }
     if (matchesKey(data, Key.pageUp)) {
-      this.scrollView.scrollBy(-Math.max(1, this.scrollView.viewportHeight - 1));
+      this.scrollView.scrollBy(
+        -Math.max(1, this.scrollView.viewportHeight - 1),
+      );
       return;
     }
     if (matchesKey(data, Key.pageDown)) {

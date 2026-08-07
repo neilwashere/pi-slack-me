@@ -38,17 +38,26 @@ function mockFetch(routes: Record<string, unknown>) {
 
 function ctxWith(opts: { hasUI?: boolean; editorResult?: string | undefined }) {
   const editor = vi.fn().mockResolvedValue(opts.editorResult);
-  return { ctx: { hasUI: opts.hasUI ?? true, ui: { confirm: vi.fn(), editor } }, editor };
+  return {
+    ctx: { hasUI: opts.hasUI ?? true, ui: { confirm: vi.fn(), editor } },
+    editor,
+  };
 }
 
 describe("slack_update_message", () => {
   it("sends chat.update with the edited text", async () => {
-    const fetchMock = mockFetch({ "chat.update": { ok: true, channel: "C1", ts: "100.0001", text: "new" } });
+    const fetchMock = mockFetch({
+      "chat.update": { ok: true, channel: "C1", ts: "100.0001", text: "new" },
+    });
     vi.stubGlobal("fetch", fetchMock);
     const { ctx } = ctxWith({ editorResult: "new" });
     const { updateMessageTool } = await import("../lib/tools/update-message");
     const text = firstText(
-      await invokeWithCtx(updateMessageTool, { channel: "C1", ts: "100.0001", text: "draft" }, ctx),
+      await invokeWithCtx(
+        updateMessageTool,
+        { channel: "C1", ts: "100.0001", text: "draft" },
+        ctx,
+      ),
     );
     expect(text).toContain("updated");
     const sent = parseJsonRequestBody(
@@ -63,7 +72,11 @@ describe("slack_update_message", () => {
     const { ctx } = ctxWith({ editorResult: undefined });
     const { updateMessageTool } = await import("../lib/tools/update-message");
     const text = firstText(
-      await invokeWithCtx(updateMessageTool, { channel: "C1", ts: "1", text: "draft" }, ctx),
+      await invokeWithCtx(
+        updateMessageTool,
+        { channel: "C1", ts: "1", text: "draft" },
+        ctx,
+      ),
     );
     expect(text).toMatch(/cancelled/i);
     expect(fetchMock).not.toHaveBeenCalled();
@@ -76,7 +89,8 @@ describe("slack_update_message", () => {
         ok: true,
         status: 200,
         headers: { get: () => null },
-        text: async () => JSON.stringify({ ok: false, error: "cant_update_message" }),
+        text: async () =>
+          JSON.stringify({ ok: false, error: "cant_update_message" }),
         json: async () => ({ ok: false, error: "cant_update_message" }),
       } as unknown as Response),
     );
@@ -119,7 +133,11 @@ describe("slack_update_message", () => {
     vi.stubGlobal("fetch", fetchMock);
     const { ctx, editor } = ctxWith({ editorResult: "ignored" });
     const { updateMessageTool } = await import("../lib/tools/update-message");
-    await invokeWithCtx(updateMessageTool, { channel: "C1", ts: "1", text: "draft" }, ctx);
+    await invokeWithCtx(
+      updateMessageTool,
+      { channel: "C1", ts: "1", text: "draft" },
+      ctx,
+    );
     expect(editor).not.toHaveBeenCalled();
     const sent = parseJsonRequestBody(
       fetchMock.mock.calls[0][1] as RequestInit,
@@ -135,7 +153,11 @@ describe("slack_update_message", () => {
     const { ctx, editor } = ctxWith({ hasUI: false });
     const { updateMessageTool } = await import("../lib/tools/update-message");
     const text = firstText(
-      await invokeWithCtx(updateMessageTool, { channel: "C1", ts: "9", text: "draft" }, ctx),
+      await invokeWithCtx(
+        updateMessageTool,
+        { channel: "C1", ts: "9", text: "draft" },
+        ctx,
+      ),
     );
     expect(text).toMatch(/headless/i);
     expect(fetchMock).not.toHaveBeenCalled();

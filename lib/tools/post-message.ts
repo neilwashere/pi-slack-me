@@ -1,10 +1,10 @@
 import { Type, type Static } from "typebox";
-import type { AgentToolResult, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type {
+  AgentToolResult,
+  ToolDefinition,
+} from "@earendil-works/pi-coding-agent";
 import { toToolResult, type SlackDetails } from "../result";
-import {
-  createSlackWorkspace,
-  type SlackWorkspace,
-} from "../slack-workspace";
+import { createSlackWorkspace, type SlackWorkspace } from "../slack-workspace";
 import { createSlackWriteReviewer } from "../slack-write-review";
 import {
   POST_MESSAGE_TITLE,
@@ -16,10 +16,19 @@ import {
 } from "../prompts";
 
 const Params = Type.Object({
-  channel: Type.Optional(Type.String({ description: POST_MESSAGE_CHANNEL_DESCRIPTION })),
-  to_user: Type.Optional(Type.String({ description: POST_MESSAGE_TO_USER_DESCRIPTION })),
-  text: Type.String({ description: POST_MESSAGE_TEXT_DESCRIPTION, minLength: 1 }),
-  thread_ts: Type.Optional(Type.String({ description: POST_MESSAGE_THREAD_TS_DESCRIPTION })),
+  channel: Type.Optional(
+    Type.String({ description: POST_MESSAGE_CHANNEL_DESCRIPTION }),
+  ),
+  to_user: Type.Optional(
+    Type.String({ description: POST_MESSAGE_TO_USER_DESCRIPTION }),
+  ),
+  text: Type.String({
+    description: POST_MESSAGE_TEXT_DESCRIPTION,
+    minLength: 1,
+  }),
+  thread_ts: Type.Optional(
+    Type.String({ description: POST_MESSAGE_THREAD_TS_DESCRIPTION }),
+  ),
 });
 
 export function createPostMessageTool(

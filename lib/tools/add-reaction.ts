@@ -1,10 +1,10 @@
 import { Type, type Static } from "typebox";
-import type { AgentToolResult, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type {
+  AgentToolResult,
+  ToolDefinition,
+} from "@earendil-works/pi-coding-agent";
 import { toToolResult, type SlackDetails } from "../result";
-import {
-  createSlackWorkspace,
-  type SlackWorkspace,
-} from "../slack-workspace";
+import { createSlackWorkspace, type SlackWorkspace } from "../slack-workspace";
 import {
   ADD_REACTION_CHANNEL_DESCRIPTION,
   ADD_REACTION_DESCRIPTION,
@@ -14,9 +14,18 @@ import {
 } from "../prompts";
 
 const Params = Type.Object({
-  channel: Type.String({ description: ADD_REACTION_CHANNEL_DESCRIPTION, minLength: 1 }),
-  name: Type.String({ description: ADD_REACTION_NAME_DESCRIPTION, minLength: 1 }),
-  timestamp: Type.String({ description: ADD_REACTION_TIMESTAMP_DESCRIPTION, minLength: 1 }),
+  channel: Type.String({
+    description: ADD_REACTION_CHANNEL_DESCRIPTION,
+    minLength: 1,
+  }),
+  name: Type.String({
+    description: ADD_REACTION_NAME_DESCRIPTION,
+    minLength: 1,
+  }),
+  timestamp: Type.String({
+    description: ADD_REACTION_TIMESTAMP_DESCRIPTION,
+    minLength: 1,
+  }),
 });
 
 export function createAddReactionTool(

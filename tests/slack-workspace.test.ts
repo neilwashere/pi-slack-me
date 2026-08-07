@@ -268,9 +268,7 @@ describe("Slack workspace", () => {
       { signal },
     );
     expect(fileStore.write).toHaveBeenCalledWith("secrets.txt", data);
-    expect(result.details.localPath).toBe(
-      "/tmp/pi-slack-me/secrets-a1b2.txt",
-    );
+    expect(result.details.localPath).toBe("/tmp/pi-slack-me/secrets-a1b2.txt");
     expect(result.text).toContain("Downloaded to");
   });
 
@@ -443,10 +441,7 @@ describe("Slack workspace", () => {
     };
     const workspace = createSlackWorkspace(transport);
     const controller = new AbortController();
-    const cancelled = workspace.directory?.userName(
-      "U999",
-      controller.signal,
-    );
+    const cancelled = workspace.directory?.userName("U999", controller.signal);
     const shared = workspace.directory?.userName("U999");
 
     controller.abort();

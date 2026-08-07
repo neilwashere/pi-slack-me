@@ -6,30 +6,32 @@ describe("Slack command result presenter", () => {
   it("shows TUI results ephemerally and only puts them in the editor on explicit input", async () => {
     const setEditorText = vi.fn();
     const notify = vi.fn();
-    const custom = vi.fn((
-      factory: (
-        tui: unknown,
-        theme: unknown,
-        keybindings: unknown,
-        done: (result: string) => void,
-      ) =>
-        | { handleInput?: (input: string) => void }
-        | Promise<{ handleInput?: (input: string) => void }>,
-    ) => {
-      return new Promise<string>((resolve) => {
-        void Promise.resolve(
-          factory(
-            { requestRender: vi.fn() } as never,
-            {
-              fg: (_name: string, text: string) => text,
-              bold: (text: string) => text,
-            } as never,
-            {} as never,
-            resolve,
-          ),
-        ).then((component) => component.handleInput?.("e"));
-      });
-    });
+    const custom = vi.fn(
+      (
+        factory: (
+          tui: unknown,
+          theme: unknown,
+          keybindings: unknown,
+          done: (result: string) => void,
+        ) =>
+          | { handleInput?: (input: string) => void }
+          | Promise<{ handleInput?: (input: string) => void }>,
+      ) => {
+        return new Promise<string>((resolve) => {
+          void Promise.resolve(
+            factory(
+              { requestRender: vi.fn() } as never,
+              {
+                fg: (_name: string, text: string) => text,
+                bold: (text: string) => text,
+              } as never,
+              {} as never,
+              resolve,
+            ),
+          ).then((component) => component.handleInput?.("e"));
+        });
+      },
+    );
     const context = {
       mode: "tui",
       ui: {

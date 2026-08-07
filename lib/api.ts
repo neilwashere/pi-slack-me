@@ -78,12 +78,7 @@ export class SlackApiError extends Error {
   readonly retryAfter?: number;
   readonly isRateLimited: boolean;
   readonly isAuthError: boolean;
-  constructor(
-    message: string,
-    status = 0,
-    code?: string,
-    retryAfter?: number,
-  ) {
+  constructor(message: string, status = 0, code?: string, retryAfter?: number) {
     super(message);
     this.name = "SlackApiError";
     this.status = status;
@@ -106,10 +101,7 @@ interface SlackResponse {
   response_metadata?: { next_cursor?: string };
 }
 
-function buildUrl(
-  method: string,
-  query: SlackGetOptions["query"],
-): string {
+function buildUrl(method: string, query: SlackGetOptions["query"]): string {
   const params = new URLSearchParams();
   if (query) {
     for (const [k, v] of Object.entries(query)) {
@@ -299,7 +291,11 @@ function requiredScopeFor(method: string): string {
 
 // Map Slack `error` codes to hints an agent can act on. Keep terse; the code
 // is always included by SlackApiError for programmatic branching.
-function friendlyError(method: string, code: string | undefined, status: number): string {
+function friendlyError(
+  method: string,
+  code: string | undefined,
+  status: number,
+): string {
   if (!code) return `Slack ${method} failed (HTTP ${status}).`;
   switch (code) {
     case "not_in_channel":
@@ -321,8 +317,11 @@ function friendlyError(method: string, code: string | undefined, status: number)
 }
 
 function friendlyStatus(method: string, status: number): string {
-  if (status === 401) return `Slack ${method}: unauthorized (HTTP 401). Check SLACK_USER_TOKEN.`;
-  if (status === 404) return `Slack ${method}: endpoint or resource not found (HTTP 404).`;
-  if (status >= 500) return `Slack ${method}: server error (HTTP ${status}). Retry; check https://status.slack.com.`;
+  if (status === 401)
+    return `Slack ${method}: unauthorized (HTTP 401). Check SLACK_USER_TOKEN.`;
+  if (status === 404)
+    return `Slack ${method}: endpoint or resource not found (HTTP 404).`;
+  if (status >= 500)
+    return `Slack ${method}: server error (HTTP ${status}). Retry; check https://status.slack.com.`;
   return `Slack ${method} failed (HTTP ${status}).`;
 }

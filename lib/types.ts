@@ -68,7 +68,12 @@ export interface SlackFileInfo {
 interface SlackSearchMatch {
   iid: string;
   team?: string;
-  channel: { id: string; name?: string; is_channel?: boolean; is_group?: boolean };
+  channel: {
+    id: string;
+    name?: string;
+    is_channel?: boolean;
+    is_group?: boolean;
+  };
   user?: string;
   username?: string;
   ts: string;

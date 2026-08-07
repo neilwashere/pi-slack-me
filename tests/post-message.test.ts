@@ -3,7 +3,10 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { invokeWithCtx, firstText, parseJsonRequestBody } from "./_helpers";
-import { setConfirmWriteEnabled, setAllowHeadlessWriteEnabled } from "../lib/confirm";
+import {
+  setConfirmWriteEnabled,
+  setAllowHeadlessWriteEnabled,
+} from "../lib/confirm";
 
 // Write-tool tests. Each tool reads a tool-execution ctx (5th arg) for the
 // review gate, so we use invokeWithCtx with a ctx stub. The gate flag is
@@ -81,11 +84,19 @@ describe("slack_post_message", () => {
   });
 
   it("posts to a channel after the user accepts the editable review", async () => {
-    const fetchMock = mockFetch({ "chat.postMessage": { ok: true, channel: "C1", ts: "100.0002" } });
+    const fetchMock = mockFetch({
+      "chat.postMessage": { ok: true, channel: "C1", ts: "100.0002" },
+    });
     vi.stubGlobal("fetch", fetchMock);
     const { ctx, editor } = ctxWith({ editorResult: "final text" });
     const { postMessageTool } = await import("../lib/tools/post-message");
-    const text = firstText(await invokeWithCtx(postMessageTool, { channel: "C1", text: "draft" }, ctx));
+    const text = firstText(
+      await invokeWithCtx(
+        postMessageTool,
+        { channel: "C1", text: "draft" },
+        ctx,
+      ),
+    );
     expect(text).toContain("C1");
     expect(text).toContain("100.0002");
     // The editor opened with the drafted text.
@@ -98,7 +109,9 @@ describe("slack_post_message", () => {
   });
 
   it("sends the edited text through unchanged when the user did not edit", async () => {
-    const fetchMock = mockFetch({ "chat.postMessage": { ok: true, channel: "C1", ts: "1" } });
+    const fetchMock = mockFetch({
+      "chat.postMessage": { ok: true, channel: "C1", ts: "1" },
+    });
     vi.stubGlobal("fetch", fetchMock);
     const { ctx } = ctxWith({ editorResult: "as-is" });
     const { postMessageTool } = await import("../lib/tools/post-message");
@@ -114,7 +127,13 @@ describe("slack_post_message", () => {
     vi.stubGlobal("fetch", fetchMock);
     const { ctx } = ctxWith({ editorResult: undefined });
     const { postMessageTool } = await import("../lib/tools/post-message");
-    const text = firstText(await invokeWithCtx(postMessageTool, { channel: "C1", text: "draft" }, ctx));
+    const text = firstText(
+      await invokeWithCtx(
+        postMessageTool,
+        { channel: "C1", text: "draft" },
+        ctx,
+      ),
+    );
     expect(text).toMatch(/cancelled/i);
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -127,20 +146,30 @@ describe("slack_post_message", () => {
     vi.stubGlobal("fetch", fetchMock);
     const { ctx } = ctxWith({ editorResult: "hey" });
     const { postMessageTool } = await import("../lib/tools/post-message");
-    const text = firstText(await invokeWithCtx(postMessageTool, { to_user: "U9", text: "hey" }, ctx));
+    const text = firstText(
+      await invokeWithCtx(postMessageTool, { to_user: "U9", text: "hey" }, ctx),
+    );
     expect(text).toContain("@U9");
     expect(text).toContain("D77");
-    const sent = parseJsonRequestBody(fetchMock.mock.calls[1][1] as RequestInit);
+    const sent = parseJsonRequestBody(
+      fetchMock.mock.calls[1][1] as RequestInit,
+    );
     expect(sent).toEqual({ channel: "D77", text: "hey" });
   });
 
   it("includes thread_ts as a threaded reply", async () => {
-    const fetchMock = mockFetch({ "chat.postMessage": { ok: true, channel: "C1", ts: "3" } });
+    const fetchMock = mockFetch({
+      "chat.postMessage": { ok: true, channel: "C1", ts: "3" },
+    });
     vi.stubGlobal("fetch", fetchMock);
     const { ctx } = ctxWith({ editorResult: "reply" });
     const { postMessageTool } = await import("../lib/tools/post-message");
     const text = firstText(
-      await invokeWithCtx(postMessageTool, { channel: "C1", thread_ts: "100.0001", text: "reply" }, ctx),
+      await invokeWithCtx(
+        postMessageTool,
+        { channel: "C1", thread_ts: "100.0001", text: "reply" },
+        ctx,
+      ),
     );
     expect(text).toMatch(/threaded reply/);
     const sent = parseJsonRequestBody(
@@ -151,7 +180,9 @@ describe("slack_post_message", () => {
 
   it("skips the review dialog when the flag is off (fast path)", async () => {
     setConfirmWriteEnabled(false);
-    const fetchMock = mockFetch({ "chat.postMessage": { ok: true, channel: "C1", ts: "4" } });
+    const fetchMock = mockFetch({
+      "chat.postMessage": { ok: true, channel: "C1", ts: "4" },
+    });
     vi.stubGlobal("fetch", fetchMock);
     const { ctx, editor } = ctxWith({ editorResult: "x" });
     const { postMessageTool } = await import("../lib/tools/post-message");
@@ -171,7 +202,13 @@ describe("slack_post_message", () => {
     vi.stubGlobal("fetch", fetchMock);
     const { ctx, editor } = ctxWith({ hasUI: false, editorResult: "ignored" });
     const { postMessageTool } = await import("../lib/tools/post-message");
-    const text = firstText(await invokeWithCtx(postMessageTool, { channel: "C1", text: "draft" }, ctx));
+    const text = firstText(
+      await invokeWithCtx(
+        postMessageTool,
+        { channel: "C1", text: "draft" },
+        ctx,
+      ),
+    );
     expect(text).toMatch(/headless/i);
     expect(fetchMock).not.toHaveBeenCalled();
     expect(editor).not.toHaveBeenCalled();
@@ -181,11 +218,19 @@ describe("slack_post_message", () => {
     // The opt-in: an unsupervised run may post. No editor (no UI); the draft
     // text is sent verbatim.
     setAllowHeadlessWriteEnabled(true);
-    const fetchMock = mockFetch({ "chat.postMessage": { ok: true, channel: "C1", ts: "5" } });
+    const fetchMock = mockFetch({
+      "chat.postMessage": { ok: true, channel: "C1", ts: "5" },
+    });
     vi.stubGlobal("fetch", fetchMock);
     const { ctx, editor } = ctxWith({ hasUI: false, editorResult: "ignored" });
     const { postMessageTool } = await import("../lib/tools/post-message");
-    const text = firstText(await invokeWithCtx(postMessageTool, { channel: "C1", text: "draft" }, ctx));
+    const text = firstText(
+      await invokeWithCtx(
+        postMessageTool,
+        { channel: "C1", text: "draft" },
+        ctx,
+      ),
+    );
     expect(text).toContain("C1");
     expect(editor).not.toHaveBeenCalled();
     const sent = parseJsonRequestBody(

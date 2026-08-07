@@ -1,10 +1,10 @@
 import { Type, type Static } from "typebox";
-import type { AgentToolResult, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type {
+  AgentToolResult,
+  ToolDefinition,
+} from "@earendil-works/pi-coding-agent";
 import { toToolResult, type SlackDetails } from "../result";
-import {
-  createSlackWorkspace,
-  type SlackWorkspace,
-} from "../slack-workspace";
+import { createSlackWorkspace, type SlackWorkspace } from "../slack-workspace";
 import {
   DOWNLOAD_FILE_TITLE,
   DOWNLOAD_FILE_DESCRIPTION,

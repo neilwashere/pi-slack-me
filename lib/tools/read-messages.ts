@@ -1,10 +1,10 @@
 import { Type, type Static } from "typebox";
-import type { AgentToolResult, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type {
+  AgentToolResult,
+  ToolDefinition,
+} from "@earendil-works/pi-coding-agent";
 import { toToolResult, type SlackDetails } from "../result";
-import {
-  createSlackWorkspace,
-  type SlackWorkspace,
-} from "../slack-workspace";
+import { createSlackWorkspace, type SlackWorkspace } from "../slack-workspace";
 import {
   READ_MESSAGES_TITLE,
   READ_MESSAGES_DESCRIPTION,
@@ -17,10 +17,22 @@ import {
 
 const Params = Type.Object({
   channel: Type.String({ description: READ_MESSAGES_CHANNEL_DESCRIPTION }),
-  limit: Type.Optional(Type.Integer({ description: READ_MESSAGES_LIMIT_DESCRIPTION, minimum: 1, maximum: 200 })),
-  oldest: Type.Optional(Type.String({ description: READ_MESSAGES_OLDEST_DESCRIPTION })),
-  latest: Type.Optional(Type.String({ description: READ_MESSAGES_LATEST_DESCRIPTION })),
-  cursor: Type.Optional(Type.String({ description: READ_MESSAGES_CURSOR_DESCRIPTION })),
+  limit: Type.Optional(
+    Type.Integer({
+      description: READ_MESSAGES_LIMIT_DESCRIPTION,
+      minimum: 1,
+      maximum: 200,
+    }),
+  ),
+  oldest: Type.Optional(
+    Type.String({ description: READ_MESSAGES_OLDEST_DESCRIPTION }),
+  ),
+  latest: Type.Optional(
+    Type.String({ description: READ_MESSAGES_LATEST_DESCRIPTION }),
+  ),
+  cursor: Type.Optional(
+    Type.String({ description: READ_MESSAGES_CURSOR_DESCRIPTION }),
+  ),
 });
 
 export function createReadMessagesTool(

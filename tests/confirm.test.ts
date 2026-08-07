@@ -1,5 +1,11 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import {
+  mkdtempSync,
+  rmSync,
+  readFileSync,
+  writeFileSync,
+  existsSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -36,10 +42,17 @@ function mockCtx(opts: {
   hasUI?: boolean;
   editorResult?: string | undefined;
   confirmResult?: boolean;
-}): { ctx: ConfirmContext; editor: ReturnType<typeof vi.fn>; confirm: ReturnType<typeof vi.fn> } {
+}): {
+  ctx: ConfirmContext;
+  editor: ReturnType<typeof vi.fn>;
+  confirm: ReturnType<typeof vi.fn>;
+} {
   const editor = vi.fn().mockResolvedValue(opts.editorResult);
   const confirm = vi.fn().mockResolvedValue(opts.confirmResult);
-  const ctx: ConfirmContext = { hasUI: opts.hasUI ?? true, ui: { confirm, editor } };
+  const ctx: ConfirmContext = {
+    hasUI: opts.hasUI ?? true,
+    ui: { confirm, editor },
+  };
   return { ctx, editor, confirm };
 }
 
@@ -87,7 +100,10 @@ describe("confirmWrite gate", () => {
   it("non-editable path: confirm() true proceeds", async () => {
     setConfirmWriteEnabled(true);
     const { ctx, editor, confirm } = mockCtx({ confirmResult: true });
-    const out = await confirmWrite(ctx, { title: "Delete?", summary: "permanent" });
+    const out = await confirmWrite(ctx, {
+      title: "Delete?",
+      summary: "permanent",
+    });
     expect(out.proceed).toBe(true);
     expect(confirm).toHaveBeenCalledWith("Delete?", "permanent");
     expect(editor).not.toHaveBeenCalled();
@@ -109,7 +125,10 @@ describe("confirmWrite gate", () => {
 describe("confirmWrite headless guard (independent of review flag)", () => {
   it("post/update in headless -> BLOCKED by default (no opt-in)", async () => {
     setConfirmWriteEnabled(true);
-    const { ctx, editor, confirm } = mockCtx({ hasUI: false, editorResult: "x" });
+    const { ctx, editor, confirm } = mockCtx({
+      hasUI: false,
+      editorResult: "x",
+    });
     const out = await confirmWrite(ctx, {
       title: "t",
       editableText: "draft",
@@ -123,14 +142,22 @@ describe("confirmWrite headless guard (independent of review flag)", () => {
   it("post/update in headless -> BLOCKED even when review flag is OFF", async () => {
     setConfirmWriteEnabled(false);
     const { ctx } = mockCtx({ hasUI: false });
-    const out = await confirmWrite(ctx, { title: "t", editableText: "d", summary: "s" });
+    const out = await confirmWrite(ctx, {
+      title: "t",
+      editableText: "d",
+      summary: "s",
+    });
     expect(out.proceed).toBe(false);
   });
 
   it("post/update in headless -> PROCEEDS when slack-allow-headless-write is ON", async () => {
     setAllowHeadlessWriteEnabled(true);
     const { ctx, editor } = mockCtx({ hasUI: false, editorResult: "x" });
-    const out = await confirmWrite(ctx, { title: "t", editableText: "draft", summary: "s" });
+    const out = await confirmWrite(ctx, {
+      title: "t",
+      editableText: "draft",
+      summary: "s",
+    });
     expect(out.proceed).toBe(true);
     expect(out.text).toBe("draft");
     expect(editor).not.toHaveBeenCalled();
@@ -176,7 +203,11 @@ describe("confirmWrite requireInteractive (destructive writes)", () => {
 
   it("confirm() false aborts a forced write", async () => {
     const { ctx } = mockCtx({ confirmResult: false });
-    const out = await confirmWrite(ctx, { title: "t", summary: "s", requireInteractive: true });
+    const out = await confirmWrite(ctx, {
+      title: "t",
+      summary: "s",
+      requireInteractive: true,
+    });
     expect(out.proceed).toBe(false);
   });
 });
@@ -201,7 +232,11 @@ describe("persistence (file-backed state)", () => {
   });
 
   it("reads the on-disk value on first access in a fresh process", () => {
-    writeFileSync(getSettingsPath(), JSON.stringify({ confirmWrite: false }), "utf8");
+    writeFileSync(
+      getSettingsPath(),
+      JSON.stringify({ confirmWrite: false }),
+      "utf8",
+    );
     expect(getConfirmWriteEnabled()).toBe(false);
   });
 
@@ -211,7 +246,11 @@ describe("persistence (file-backed state)", () => {
   });
 
   it("ignores an unrelated confirmWrite=true-but-wrong-type value safely", () => {
-    writeFileSync(getSettingsPath(), JSON.stringify({ confirmWrite: "no" }), "utf8");
+    writeFileSync(
+      getSettingsPath(),
+      JSON.stringify({ confirmWrite: "no" }),
+      "utf8",
+    );
     expect(getConfirmWriteEnabled()).toBe(true);
   });
 
@@ -233,7 +272,11 @@ describe("persistence (file-backed state)", () => {
 
   it("allowHeadlessWrite defaults OFF and only an explicit literal true enables it", () => {
     expect(getAllowHeadlessWriteEnabled()).toBe(false);
-    writeFileSync(getSettingsPath(), JSON.stringify({ allowHeadlessWrite: "yes" }), "utf8");
+    writeFileSync(
+      getSettingsPath(),
+      JSON.stringify({ allowHeadlessWrite: "yes" }),
+      "utf8",
+    );
     expect(getAllowHeadlessWriteEnabled()).toBe(false);
     setAllowHeadlessWriteEnabled(true);
     expect(getAllowHeadlessWriteEnabled()).toBe(true);
@@ -269,7 +312,11 @@ describe("summarizePostMessage", () => {
 
 describe("summarizeUpdateMessage", () => {
   it("renders channel + ts + text", () => {
-    const s = summarizeUpdateMessage({ channel: "C9", ts: "100.0001", text: "fixed" });
+    const s = summarizeUpdateMessage({
+      channel: "C9",
+      ts: "100.0001",
+      text: "fixed",
+    });
     expect(s).toContain("channel: C9");
     expect(s).toContain("ts: 100.0001");
     expect(s).toContain("fixed");

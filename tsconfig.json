@@ -13,5 +13,10 @@
     "tsBuildInfoFile": "./node_modules/.cache/pi-slack-me.tsbuildinfo",
     "rootDir": "."
   },
-  "include": ["extensions/**/*.ts", "lib/**/*.ts", "tests/**/*.ts", "vitest.config.ts"]
+  "include": [
+    "extensions/**/*.ts",
+    "lib/**/*.ts",
+    "tests/**/*.ts",
+    "vitest.config.ts"
+  ]
 }

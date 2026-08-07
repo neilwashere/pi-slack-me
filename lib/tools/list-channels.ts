@@ -1,10 +1,10 @@
 import { Type, type Static } from "typebox";
-import type { AgentToolResult, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type {
+  AgentToolResult,
+  ToolDefinition,
+} from "@earendil-works/pi-coding-agent";
 import { toToolResult, type SlackDetails } from "../result";
-import {
-  createSlackWorkspace,
-  type SlackWorkspace,
-} from "../slack-workspace";
+import { createSlackWorkspace, type SlackWorkspace } from "../slack-workspace";
 import {
   LIST_CHANNELS_TITLE,
   LIST_CHANNELS_DESCRIPTION,
@@ -20,9 +20,19 @@ import {
 // conversations.list with a user token returns public channels workspace-wide
 // (useful, but not the membership view we want as the default discovery tool).
 const Params = Type.Object({
-  limit: Type.Optional(Type.Integer({ description: LIST_CHANNELS_LIMIT_DESCRIPTION, minimum: 1, maximum: 999 })),
-  types: Type.Optional(Type.String({ description: LIST_CHANNELS_TYPES_DESCRIPTION })),
-  cursor: Type.Optional(Type.String({ description: LIST_CHANNELS_CURSOR_DESCRIPTION })),
+  limit: Type.Optional(
+    Type.Integer({
+      description: LIST_CHANNELS_LIMIT_DESCRIPTION,
+      minimum: 1,
+      maximum: 999,
+    }),
+  ),
+  types: Type.Optional(
+    Type.String({ description: LIST_CHANNELS_TYPES_DESCRIPTION }),
+  ),
+  cursor: Type.Optional(
+    Type.String({ description: LIST_CHANNELS_CURSOR_DESCRIPTION }),
+  ),
 });
 
 export function createListChannelsTool(

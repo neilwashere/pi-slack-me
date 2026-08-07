@@ -1,10 +1,10 @@
 import { Type, type Static } from "typebox";
-import type { AgentToolResult, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type {
+  AgentToolResult,
+  ToolDefinition,
+} from "@earendil-works/pi-coding-agent";
 import { toToolResult, type SlackDetails } from "../result";
-import {
-  createSlackWorkspace,
-  type SlackWorkspace,
-} from "../slack-workspace";
+import { createSlackWorkspace, type SlackWorkspace } from "../slack-workspace";
 import { createSlackWriteReviewer } from "../slack-write-review";
 import {
   UPDATE_MESSAGE_TITLE,
@@ -17,7 +17,10 @@ import {
 const Params = Type.Object({
   channel: Type.String({ description: UPDATE_MESSAGE_CHANNEL_DESCRIPTION }),
   ts: Type.String({ description: UPDATE_MESSAGE_TS_DESCRIPTION }),
-  text: Type.String({ description: UPDATE_MESSAGE_TEXT_DESCRIPTION, minLength: 1 }),
+  text: Type.String({
+    description: UPDATE_MESSAGE_TEXT_DESCRIPTION,
+    minLength: 1,
+  }),
 });
 
 export function createUpdateMessageTool(
@@ -52,4 +55,6 @@ export function createUpdateMessageTool(
   };
 }
 
-export const updateMessageTool = createUpdateMessageTool(createSlackWorkspace());
+export const updateMessageTool = createUpdateMessageTool(
+  createSlackWorkspace(),
+);

@@ -212,9 +212,12 @@ function friendlyError(method, code, status) {
   }
 }
 function friendlyStatus(method, status) {
-  if (status === 401) return `Slack ${method}: unauthorized (HTTP 401). Check SLACK_USER_TOKEN.`;
-  if (status === 404) return `Slack ${method}: endpoint or resource not found (HTTP 404).`;
-  if (status >= 500) return `Slack ${method}: server error (HTTP ${status}). Retry; check https://status.slack.com.`;
+  if (status === 401)
+    return `Slack ${method}: unauthorized (HTTP 401). Check SLACK_USER_TOKEN.`;
+  if (status === 404)
+    return `Slack ${method}: endpoint or resource not found (HTTP 404).`;
+  if (status >= 500)
+    return `Slack ${method}: server error (HTTP ${status}). Retry; check https://status.slack.com.`;
   return `Slack ${method} failed (HTTP ${status}).`;
 }
 

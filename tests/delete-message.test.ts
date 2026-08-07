@@ -38,17 +38,26 @@ function mockFetch(routes: Record<string, unknown>) {
 
 function ctxWith(opts: { hasUI?: boolean; confirmResult?: boolean }) {
   const confirm = vi.fn().mockResolvedValue(opts.confirmResult);
-  return { ctx: { hasUI: opts.hasUI ?? true, ui: { confirm, editor: vi.fn() } }, confirm };
+  return {
+    ctx: { hasUI: opts.hasUI ?? true, ui: { confirm, editor: vi.fn() } },
+    confirm,
+  };
 }
 
 describe("slack_delete_message", () => {
   it("sends chat.delete after yes/no confirm", async () => {
-    const fetchMock = mockFetch({ "chat.delete": { ok: true, channel: "C1", ts: "100.0001" } });
+    const fetchMock = mockFetch({
+      "chat.delete": { ok: true, channel: "C1", ts: "100.0001" },
+    });
     vi.stubGlobal("fetch", fetchMock);
     const { ctx, confirm } = ctxWith({ confirmResult: true });
     const { deleteMessageTool } = await import("../lib/tools/delete-message");
     const text = firstText(
-      await invokeWithCtx(deleteMessageTool, { channel: "C1", ts: "100.0001" }, ctx),
+      await invokeWithCtx(
+        deleteMessageTool,
+        { channel: "C1", ts: "100.0001" },
+        ctx,
+      ),
     );
     expect(text).toContain("deleted");
     expect(confirm).toHaveBeenCalledOnce();
@@ -85,7 +94,9 @@ describe("slack_delete_message", () => {
 
   it("confirms even when the flag is OFF (forced)", async () => {
     setConfirmWriteEnabled(false);
-    const fetchMock = mockFetch({ "chat.delete": { ok: true, channel: "C1", ts: "9" } });
+    const fetchMock = mockFetch({
+      "chat.delete": { ok: true, channel: "C1", ts: "9" },
+    });
     vi.stubGlobal("fetch", fetchMock);
     const { ctx, confirm } = ctxWith({ confirmResult: true });
     const { deleteMessageTool } = await import("../lib/tools/delete-message");

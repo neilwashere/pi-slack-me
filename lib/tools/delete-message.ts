@@ -1,10 +1,10 @@
 import { Type, type Static } from "typebox";
-import type { AgentToolResult, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type {
+  AgentToolResult,
+  ToolDefinition,
+} from "@earendil-works/pi-coding-agent";
 import { toToolResult, type SlackDetails } from "../result";
-import {
-  createSlackWorkspace,
-  type SlackWorkspace,
-} from "../slack-workspace";
+import { createSlackWorkspace, type SlackWorkspace } from "../slack-workspace";
 import { createSlackWriteReviewer } from "../slack-write-review";
 import {
   DELETE_MESSAGE_TITLE,
@@ -49,4 +49,6 @@ export function createDeleteMessageTool(
   };
 }
 
-export const deleteMessageTool = createDeleteMessageTool(createSlackWorkspace());
+export const deleteMessageTool = createDeleteMessageTool(
+  createSlackWorkspace(),
+);

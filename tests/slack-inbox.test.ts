@@ -13,7 +13,10 @@ describe("formatListenerStatus", () => {
     ["disconnected", "Slack: disconnected · 3 unread"],
     ["error", "Slack: error · 3 unread"],
     ["stopped", "Slack: off · 3 unread"],
-  ] as const)("shows %s state alongside retained messages", (state, expected) => {
-    expect(formatListenerStatus({ state, unread: 3 })).toBe(expected);
-  });
+  ] as const)(
+    "shows %s state alongside retained messages",
+    (state, expected) => {
+      expect(formatListenerStatus({ state, unread: 3 })).toBe(expected);
+    },
+  );
 });

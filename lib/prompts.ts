@@ -75,8 +75,7 @@ export const SEARCH_SORT_DESCRIPTION =
 export const SEARCH_SORT_DIR_DESCRIPTION =
   'Sort direction: "desc" (newest/best first) or "asc". Default "desc".';
 
-export const SEARCH_PAGE_DESCRIPTION =
-  "Page number for pagination. Default 1.";
+export const SEARCH_PAGE_DESCRIPTION = "Page number for pagination. Default 1.";
 
 // -------------------------------------------------- download file ---------
 

@@ -11,7 +11,11 @@ afterEach(() => {
 
 // Build a fetch mock that returns a given JSON body + status. Slack returns
 // 200 with {ok:false} for logical failures, so status alone is not enough.
-function mockFetch(body: unknown, status = 200, headers: Record<string, string> = {}) {
+function mockFetch(
+  body: unknown,
+  status = 200,
+  headers: Record<string, string> = {},
+) {
   return vi.fn().mockResolvedValue({
     ok: status >= 200 && status < 300,
     status,
@@ -26,11 +30,15 @@ describe("slackGet", () => {
     const fetchMock = mockFetch({ ok: true, channels: [{ id: "C1" }] });
     vi.stubGlobal("fetch", fetchMock);
     const { slackGet } = await import("../lib/api");
-    const resp = await slackGet<{ channels: { id: string }[] }>("conversations.list");
+    const resp = await slackGet<{ channels: { id: string }[] }>(
+      "conversations.list",
+    );
     expect(resp.channels[0].id).toBe("C1");
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toContain("conversations.list");
-    expect((init.headers as Record<string, string>).Authorization).toBe("Bearer xoxp-test");
+    expect((init.headers as Record<string, string>).Authorization).toBe(
+      "Bearer xoxp-test",
+    );
   });
 
   it("serializes query params, skipping undefined/null", async () => {
@@ -50,7 +58,9 @@ describe("slackGet", () => {
   it("maps a logical {ok:false} body to SlackApiError with the code", async () => {
     vi.stubGlobal("fetch", mockFetch({ ok: false, error: "not_in_channel" }));
     const { slackGet, SlackApiError } = await import("../lib/api");
-    await expect(slackGet("conversations.history")).rejects.toThrow(SlackApiError);
+    await expect(slackGet("conversations.history")).rejects.toThrow(
+      SlackApiError,
+    );
     try {
       await slackGet("conversations.history");
     } catch (err) {
@@ -73,7 +83,12 @@ describe("slackGet", () => {
   });
 
   it("surfaces 429 with retry-after as isRateLimited and the hint", async () => {
-    vi.stubGlobal("fetch", mockFetch({ ok: false, error: "ratelimited" }, 429, { "retry-after": "12" }));
+    vi.stubGlobal(
+      "fetch",
+      mockFetch({ ok: false, error: "ratelimited" }, 429, {
+        "retry-after": "12",
+      }),
+    );
     const { slackGet } = await import("../lib/api");
     try {
       await slackGet("search.messages");
@@ -116,7 +131,9 @@ describe("slackGet", () => {
       vi.fn().mockRejectedValue(new Error("The operation was aborted")),
     );
     const { slackGet } = await import("../lib/api");
-    await expect(slackGet("auth.test")).rejects.toThrow(/timed out|Network error/);
+    await expect(slackGet("auth.test")).rejects.toThrow(
+      /timed out|Network error/,
+    );
   });
 
   it("propagates caller cancellation to the active request", async () => {
@@ -151,29 +168,45 @@ describe("slackDownload", () => {
     const buf = new ArrayBuffer(4);
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockResolvedValue({ ok: true, status: 200, arrayBuffer: async () => buf } as unknown as Response),
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        arrayBuffer: async () => buf,
+      } as unknown as Response),
     );
     const { slackDownload } = await import("../lib/api");
     const out = await slackDownload("https://files.slack.com/x");
     expect(out).toBe(buf);
-    const [, init] = (vi.mocked(fetch).mock.calls[0] as [string, RequestInit]);
-    expect((init.headers as Record<string, string>).Authorization).toBe("Bearer xoxp-test");
+    const [, init] = vi.mocked(fetch).mock.calls[0] as [string, RequestInit];
+    expect((init.headers as Record<string, string>).Authorization).toBe(
+      "Bearer xoxp-test",
+    );
   });
 
   it("throws SlackApiError on non-200", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockResolvedValue({ ok: false, status: 404, arrayBuffer: async () => new ArrayBuffer(0) } as unknown as Response),
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 404,
+        arrayBuffer: async () => new ArrayBuffer(0),
+      } as unknown as Response),
     );
     const { slackDownload, SlackApiError } = await import("../lib/api");
-    await expect(slackDownload("https://files.slack.com/x")).rejects.toThrow(SlackApiError);
+    await expect(slackDownload("https://files.slack.com/x")).rejects.toThrow(
+      SlackApiError,
+    );
   });
 });
 
 describe("slackPost", () => {
   // Capture-aware fetch mock: returns the captured init so tests can assert
   // method, headers, and the JSON body sent on a POST.
-  function mockPost(body: unknown, status = 200, headers: Record<string, string> = {}) {
+  function mockPost(
+    body: unknown,
+    status = 200,
+    headers: Record<string, string> = {},
+  ) {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: status >= 200 && status < 300,
       status,
@@ -188,7 +221,9 @@ describe("slackPost", () => {
   it("POSTs with bearer auth, JSON content-type, and a JSON-stringified body", async () => {
     const fetchMock = mockPost({ ok: true, channel: "C1", ts: "1" });
     const { slackPost } = await import("../lib/api");
-    await slackPost("chat.postMessage", { body: { channel: "C1", text: "hi" } });
+    await slackPost("chat.postMessage", {
+      body: { channel: "C1", text: "hi" },
+    });
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toContain("chat.postMessage");
     expect(init.method).toBe("POST");
@@ -203,7 +238,9 @@ describe("slackPost", () => {
     const { slackPost } = await import("../lib/api");
     await slackPost("chat.delete", { query: { channel: "C1" } });
     const init = fetchMock.mock.calls[0][1] as RequestInit;
-    expect((init.headers as Record<string, string>)["Content-Type"]).toBeUndefined();
+    expect(
+      (init.headers as Record<string, string>)["Content-Type"],
+    ).toBeUndefined();
     expect(init.body).toBeUndefined();
   });
 

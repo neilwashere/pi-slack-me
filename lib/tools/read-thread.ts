@@ -1,10 +1,10 @@
 import { Type, type Static } from "typebox";
-import type { AgentToolResult, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type {
+  AgentToolResult,
+  ToolDefinition,
+} from "@earendil-works/pi-coding-agent";
 import { toToolResult, type SlackDetails } from "../result";
-import {
-  createSlackWorkspace,
-  type SlackWorkspace,
-} from "../slack-workspace";
+import { createSlackWorkspace, type SlackWorkspace } from "../slack-workspace";
 import {
   READ_THREAD_TITLE,
   READ_THREAD_DESCRIPTION,
@@ -17,8 +17,16 @@ import {
 const Params = Type.Object({
   channel: Type.String({ description: READ_THREAD_CHANNEL_DESCRIPTION }),
   thread_ts: Type.String({ description: READ_THREAD_TS_DESCRIPTION }),
-  limit: Type.Optional(Type.Integer({ description: READ_THREAD_LIMIT_DESCRIPTION, minimum: 1, maximum: 1000 })),
-  cursor: Type.Optional(Type.String({ description: READ_THREAD_CURSOR_DESCRIPTION })),
+  limit: Type.Optional(
+    Type.Integer({
+      description: READ_THREAD_LIMIT_DESCRIPTION,
+      minimum: 1,
+      maximum: 1000,
+    }),
+  ),
+  cursor: Type.Optional(
+    Type.String({ description: READ_THREAD_CURSOR_DESCRIPTION }),
+  ),
 });
 
 export function createReadThreadTool(

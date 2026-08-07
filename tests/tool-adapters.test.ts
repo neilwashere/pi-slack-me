@@ -9,10 +9,7 @@ import { createReadMessagesTool } from "../lib/tools/read-messages";
 import { createReadThreadTool } from "../lib/tools/read-thread";
 import { createSearchTool } from "../lib/tools/search";
 import { createUpdateMessageTool } from "../lib/tools/update-message";
-import type {
-  SlackOperation,
-  SlackWorkspace,
-} from "../lib/slack-workspace";
+import type { SlackOperation, SlackWorkspace } from "../lib/slack-workspace";
 
 type AdapterFactory = (workspace: SlackWorkspace) => { execute: unknown };
 
@@ -165,41 +162,44 @@ function invokeAdapter(
 }
 
 describe("Slack tool adapters", () => {
-  it.each(adapterCases)("maps $name to the shared workspace", async (testCase) => {
-    const operationResult = {
-      title: "Slack result",
-      text: "Slack operation complete.",
-      details: { operation: testCase.operation.operation },
-    };
-    const workspace: SlackWorkspace = {
-      execute: vi.fn().mockResolvedValue(operationResult),
-    };
-    const signal = new AbortController().signal;
+  it.each(adapterCases)(
+    "maps $name to the shared workspace",
+    async (testCase) => {
+      const operationResult = {
+        title: "Slack result",
+        text: "Slack operation complete.",
+        details: { operation: testCase.operation.operation },
+      };
+      const workspace: SlackWorkspace = {
+        execute: vi.fn().mockResolvedValue(operationResult),
+      };
+      const signal = new AbortController().signal;
 
-    const result = await invokeAdapter(
-      testCase.create(workspace),
-      testCase.params,
-      signal,
-    );
+      const result = await invokeAdapter(
+        testCase.create(workspace),
+        testCase.params,
+        signal,
+      );
 
-    const expectedOptions = testCase.reviewed
-      ? {
-          signal,
-          reviewer: expect.objectContaining({
-            hasUI: true,
-            review: expect.any(Function),
-          }),
-        }
-      : { signal };
-    expect(workspace.execute).toHaveBeenCalledWith(
-      testCase.operation,
-      expectedOptions,
-    );
-    expect(result.content).toEqual([
-      { type: "text", text: operationResult.text },
-    ]);
-    expect(result.details).toEqual(operationResult.details);
-  });
+      const expectedOptions = testCase.reviewed
+        ? {
+            signal,
+            reviewer: expect.objectContaining({
+              hasUI: true,
+              review: expect.any(Function),
+            }),
+          }
+        : { signal };
+      expect(workspace.execute).toHaveBeenCalledWith(
+        testCase.operation,
+        expectedOptions,
+      );
+      expect(result.content).toEqual([
+        { type: "text", text: operationResult.text },
+      ]);
+      expect(result.details).toEqual(operationResult.details);
+    },
+  );
 
   it("declares count and limit parameters as integers", () => {
     const workspace: SlackWorkspace = { execute: vi.fn() };

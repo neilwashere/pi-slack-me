@@ -56,7 +56,9 @@ export function firstText(result: AgentToolResult<unknown>): string {
   return part.text;
 }
 
-export function parseJsonRequestBody(init: RequestInit): Record<string, unknown> {
+export function parseJsonRequestBody(
+  init: RequestInit,
+): Record<string, unknown> {
   if (typeof init.body !== "string") {
     throw new Error("Expected a JSON request body.");
   }

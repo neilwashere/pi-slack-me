@@ -36,7 +36,13 @@ describe("slack_list_channels", () => {
         "users.conversations": {
           ok: true,
           channels: [
-            { id: "C1", name: "general", is_channel: true, num_members: 42, topic: { value: "announcements" } },
+            {
+              id: "C1",
+              name: "general",
+              is_channel: true,
+              num_members: 42,
+              topic: { value: "announcements" },
+            },
             { id: "G2", name: "secret", is_group: true, is_private: true },
             { id: "D3", is_im: true, user: "U9" },
           ],
@@ -52,7 +58,9 @@ describe("slack_list_channels", () => {
   });
 
   it("defaults to public channels without requiring private-channel or DM scopes", async () => {
-    const fetchMock = mockFetch({ "users.conversations": { ok: true, channels: [] } });
+    const fetchMock = mockFetch({
+      "users.conversations": { ok: true, channels: [] },
+    });
     vi.stubGlobal("fetch", fetchMock);
     const { listChannelsTool } = await import("../lib/tools/list-channels");
     await invoke(listChannelsTool, {});
@@ -61,7 +69,9 @@ describe("slack_list_channels", () => {
   });
 
   it("preserves an explicit conversation-type filter", async () => {
-    const fetchMock = mockFetch({ "users.conversations": { ok: true, channels: [] } });
+    const fetchMock = mockFetch({
+      "users.conversations": { ok: true, channels: [] },
+    });
     vi.stubGlobal("fetch", fetchMock);
     const { listChannelsTool } = await import("../lib/tools/list-channels");
     await invoke(listChannelsTool, { types: "im,mpim" });
@@ -78,11 +88,19 @@ describe("slack_read_messages", () => {
         "conversations.history": {
           ok: true,
           messages: [
-            { user: "U1", text: "deploy broke", ts: "1512085950.000216", reply_count: 3 },
+            {
+              user: "U1",
+              text: "deploy broke",
+              ts: "1512085950.000216",
+              reply_count: 3,
+            },
           ],
           has_more: true,
         },
-        "users.info": { ok: true, user: { id: "U1", profile: { display_name: "Esteban" } } },
+        "users.info": {
+          ok: true,
+          user: { id: "U1", profile: { display_name: "Esteban" } },
+        },
       }),
     );
     const { readMessagesTool } = await import("../lib/tools/read-messages");
@@ -97,7 +115,10 @@ describe("slack_read_messages", () => {
     vi.stubGlobal(
       "fetch",
       mockFetch({
-        "conversations.history": { ok: true, messages: [{ user: "UGONE", text: "hi", ts: "1512085950.000216" }] },
+        "conversations.history": {
+          ok: true,
+          messages: [{ user: "UGONE", text: "hi", ts: "1512085950.000216" }],
+        },
         "users.info": { ok: false, error: "user_not_found" },
       }),
     );
@@ -115,12 +136,19 @@ describe("slack_read_messages", () => {
           { user: "U1", text: "permalink target", ts: "1783521062.438029" },
         ],
       },
-      "users.info": { ok: true, user: { id: "U1", profile: { display_name: "Jeff" } } },
+      "users.info": {
+        ok: true,
+        user: { id: "U1", profile: { display_name: "Jeff" } },
+      },
     });
     vi.stubGlobal("fetch", fetchMock);
     const { readMessagesTool } = await import("../lib/tools/read-messages");
     const text = firstText(
-      await invoke(readMessagesTool, { channel: "C04C38RJU7R", oldest: "1783521062.438029", limit: 1 }),
+      await invoke(readMessagesTool, {
+        channel: "C04C38RJU7R",
+        oldest: "1783521062.438029",
+        limit: 1,
+      }),
     );
     // Regression: Slack defaults oldest/latest to EXCLUSIVE, so the message at
     // the boundary ts would be dropped. We now send inclusive=true whenever a
@@ -133,7 +161,9 @@ describe("slack_read_messages", () => {
   });
 
   it("does not send inclusive when no oldest/latest is set", async () => {
-    const fetchMock = mockFetch({ "conversations.history": { ok: true, messages: [] } });
+    const fetchMock = mockFetch({
+      "conversations.history": { ok: true, messages: [] },
+    });
     vi.stubGlobal("fetch", fetchMock);
     const { readMessagesTool } = await import("../lib/tools/read-messages");
     await invoke(readMessagesTool, { channel: "C1" });
@@ -211,7 +241,9 @@ describe("slack_search", () => {
   it("reports empty when no matches", async () => {
     vi.stubGlobal(
       "fetch",
-      mockFetch({ "search.messages": { ok: true, messages: { matches: [], total: 0 } } }),
+      mockFetch({
+        "search.messages": { ok: true, messages: { matches: [], total: 0 } },
+      }),
     );
     const { searchTool } = await import("../lib/tools/search");
     const text = firstText(await invoke(searchTool, { query: "nothing" }));
@@ -246,7 +278,8 @@ describe("slack_download_file", () => {
       return Promise.resolve({
         ok: true,
         status: 200,
-        arrayBuffer: async () => buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength),
+        arrayBuffer: async () =>
+          buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength),
       } as unknown as Response);
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -277,9 +310,11 @@ describe("auth gate (all tools)", () => {
     delete process.env.SLACK_USER_TOKEN;
     const { listChannelsTool } = await import("../lib/tools/list-channels");
     const { readMessagesTool } = await import("../lib/tools/read-messages");
-    await expect(invoke(listChannelsTool, {})).rejects.toThrow(/SLACK_USER_TOKEN/);
-    await expect(
-      invoke(readMessagesTool, { channel: "C1" }),
-    ).rejects.toThrow(/SLACK_USER_TOKEN/);
+    await expect(invoke(listChannelsTool, {})).rejects.toThrow(
+      /SLACK_USER_TOKEN/,
+    );
+    await expect(invoke(readMessagesTool, { channel: "C1" })).rejects.toThrow(
+      /SLACK_USER_TOKEN/,
+    );
   });
 });
