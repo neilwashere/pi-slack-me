@@ -16,6 +16,7 @@ interface SocketEvent {
       ts: string;
       subtype?: string;
       bot_id?: string;
+      thread_ts?: string;
     };
   };
   event: SocketEvent["body"]["event"];
@@ -306,6 +307,107 @@ describe("SlackEventListener", () => {
     ]);
   });
 
+  it("notifies for replies in a thread the user has participated in", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | Request) => {
+        const url = String(input);
+        if (url.includes("auth.test")) {
+          return slackResponse({ ok: true, user_id: "USELF" });
+        }
+        if (url.includes("users.info")) {
+          return slackResponse({ ok: true, user: { id: "UOTHER" } });
+        }
+        if (url.includes("conversations.info")) {
+          return slackResponse({
+            ok: true,
+            channel: { id: "C123", name: "engineering" },
+          });
+        }
+        throw new Error(`Unexpected Slack request: ${url}`);
+      }),
+    );
+
+    const participating = new Set<string>();
+    const threadTracker = {
+      mark: vi.fn((channel: string, threadTs: string) => {
+        participating.add(`${channel}:${threadTs}`);
+      }),
+      participates: vi.fn(async (channel: string, threadTs: string) =>
+        participating.has(`${channel}:${threadTs}`),
+      ),
+    };
+    const onAttention = vi.fn();
+    const socket = new FakeSocketClient();
+    const listener = new SlackEventListener({
+      socket,
+      threadTracker,
+      onAttention,
+    });
+    await listener.start();
+
+    const ownRoot: SocketEvent = {
+      ack: vi.fn().mockResolvedValue(undefined),
+      body: {
+        event_id: "EvOwnRoot",
+        event: {
+          type: "message",
+          channel: "C123",
+          channel_type: "channel",
+          user: "USELF",
+          text: "I started this thread",
+          ts: "1786020000.000460",
+        },
+      },
+      event: undefined as never,
+    };
+    ownRoot.event = ownRoot.body.event;
+    socket.emit("message", ownRoot);
+    await vi.waitFor(() =>
+      expect(threadTracker.mark).toHaveBeenCalledWith(
+        "C123",
+        "1786020000.000460",
+      ),
+    );
+
+    const reply: SocketEvent = {
+      ack: vi.fn().mockResolvedValue(undefined),
+      body: {
+        event_id: "EvThreadReply",
+        event: {
+          type: "message",
+          channel: "C123",
+          channel_type: "channel",
+          user: "UOTHER",
+          text: "A follow-up without another mention",
+          ts: "1786020000.000470",
+          thread_ts: "1786020000.000460",
+        },
+      },
+      event: undefined as never,
+    };
+    reply.event = reply.body.event;
+    socket.emit("message", reply);
+
+    await vi.waitFor(() => expect(listener.status().unread).toBe(1));
+    expect(threadTracker.participates).toHaveBeenCalledWith(
+      "C123",
+      "1786020000.000460",
+      "USELF",
+    );
+    expect(listener.readInbox(1)).toEqual([
+      expect.objectContaining({
+        eventId: "EvThreadReply",
+        threadTimestamp: "1786020000.000460",
+        isMention: false,
+        attentionKind: "thread-reply",
+      }),
+    ]);
+    expect(onAttention).toHaveBeenCalledWith(
+      expect.objectContaining({ eventId: "EvThreadReply" }),
+    );
+  });
+
   it("acknowledges Slack retries without duplicating the inbox message", async () => {
     vi.stubGlobal(
       "fetch",
@@ -516,6 +618,9 @@ describe("SlackEventListener", () => {
     socket.emit("message", event);
 
     await vi.waitFor(() => expect(listener.status().unread).toBe(1));
+    expect(listener.readInbox(0)).toEqual([]);
+    expect(listener.readInbox(-1)).toEqual([]);
+    expect(listener.status().unread).toBe(1);
     expect(listener.readInbox(1)).toHaveLength(1);
     expect(listener.status().unread).toBe(0);
     expect(listener.clearInbox()).toBe(1);
@@ -549,11 +654,13 @@ describe("SlackEventListener", () => {
     const socket = new FakeSocketClient();
     const onStatusChange = vi.fn();
     const onMention = vi.fn();
+    const onAttention = vi.fn();
     const listener = new SlackEventListener({
       socket,
       watchedChannels: ["CWATCHED"],
       onStatusChange,
       onMention,
+      onAttention,
     });
     await listener.start();
     onStatusChange.mockClear();
@@ -581,6 +688,13 @@ describe("SlackEventListener", () => {
     expect(onMention).toHaveBeenCalledOnce();
     expect(onMention).toHaveBeenCalledWith(
       expect.objectContaining({ eventId: "000802", isMention: true }),
+    );
+    expect(onAttention).toHaveBeenCalledOnce();
+    expect(onAttention).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventId: "000802",
+        attentionKind: "mention",
+      }),
     );
     expect(onStatusChange).toHaveBeenLastCalledWith({
       state: "connected",
@@ -1041,14 +1155,48 @@ describe("SlackEventListener", () => {
     const onError = vi.fn();
     const listener = new SlackEventListener({ socket, onError });
 
-    await expect(listener.start()).rejects.toThrow();
+    let startError: unknown;
+    try {
+      await listener.start();
+    } catch (error) {
+      startError = error;
+    }
 
     expect(listener.status().state).toBe("error");
     expect(onError).toHaveBeenCalledOnce();
-    const message = String(onError.mock.calls[0]?.[0]);
-    expect(message).toContain("[REDACTED]");
-    expect(message).not.toContain(TEST_APP_TOKEN);
-    expect(message).not.toContain("wss://");
+    for (const message of [
+      String(startError),
+      String(onError.mock.calls[0]?.[0]),
+    ]) {
+      expect(message).toContain("[REDACTED]");
+      expect(message).not.toContain(TEST_APP_TOKEN);
+      expect(message).not.toContain("wss://");
+    }
+  });
+
+  it("normalizes an SDK rejection without error details", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | Request) => {
+        const url = String(input);
+        if (url.includes("auth.test")) {
+          return slackResponse({ ok: true, user_id: "USELF" });
+        }
+        throw new Error(`Unexpected Slack request: ${url}`);
+      }),
+    );
+
+    const socket = new FakeSocketClient();
+    socket.start.mockRejectedValue(undefined);
+    const onError = vi.fn();
+    const listener = new SlackEventListener({ socket, onError });
+
+    await expect(listener.start()).rejects.toThrow(
+      "connection failed without error details",
+    );
+    expect(onError).toHaveBeenCalledWith(
+      "Slack Socket Mode: connection failed without error details.",
+    );
   });
 
   it("keeps inbox order stable when name lookups finish out of order", async () => {

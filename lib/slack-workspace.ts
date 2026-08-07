@@ -2,14 +2,8 @@ import { randomBytes } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join, parse } from "node:path";
-import {
-  slackDownload,
-  slackGet,
-  slackPost,
-  type SlackDownloadOptions,
-  type SlackGetOptions,
-  type SlackPostOptions,
-} from "./api";
+import { createSlackDirectory, type SlackDirectory } from "./slack-directory";
+import { createSlackTransport, type SlackTransport } from "./slack-transport";
 import {
   summarizeDeleteMessage,
   summarizePostMessage,
@@ -26,11 +20,8 @@ import type {
   SlackFileInfo,
   SlackMessage,
   SlackSearchResult,
-  SlackUser,
 } from "./types";
 import type { SlackWriteReviewer } from "./slack-write-review";
-
-const MAX_DIRECTORY_ENTRIES = 1_000;
 
 interface ListChannelsOperation {
   operation: "list-channels";
@@ -132,11 +123,8 @@ export interface SlackOperationOptions {
   reviewer?: SlackWriteReviewer;
 }
 
-export interface SlackDirectory {
-  selfUserId(signal?: AbortSignal): Promise<string>;
-  userName(userId: string, signal?: AbortSignal): Promise<string>;
-  channelName(channelId: string, signal?: AbortSignal): Promise<string>;
-}
+export { createSlackDirectory, createSlackTransport };
+export type { SlackDirectory, SlackTransport };
 
 export interface SlackWorkspace {
   readonly directory?: SlackDirectory;
@@ -144,12 +132,6 @@ export interface SlackWorkspace {
     request: SlackOperation,
     options?: SlackOperationOptions,
   ): Promise<SlackOperationResult>;
-}
-
-export interface SlackTransport {
-  get<T>(method: string, options?: SlackGetOptions): Promise<T>;
-  post<T>(method: string, options?: SlackPostOptions): Promise<T>;
-  download(url: string, options?: SlackDownloadOptions): Promise<ArrayBuffer>;
 }
 
 export interface SlackFileStore {
@@ -167,21 +149,6 @@ interface ReadMessagesResponse {
   messages?: SlackMessage[];
   has_more?: boolean;
   response_metadata?: { next_cursor?: string };
-}
-
-interface UserInfoResponse {
-  ok: boolean;
-  user?: SlackUser;
-}
-
-interface AuthTestResponse {
-  ok: boolean;
-  user_id?: string;
-}
-
-interface ChannelInfoResponse {
-  ok: boolean;
-  channel?: SlackChannel;
 }
 
 interface SearchResponse {
@@ -205,11 +172,7 @@ interface OpenConversationResponse {
   channel?: { id?: string };
 }
 
-const defaultTransport: SlackTransport = {
-  get: slackGet,
-  post: slackPost,
-  download: slackDownload,
-};
+const defaultTransport = createSlackTransport();
 
 const tempDirectory = join(tmpdir(), "pi-slack-me");
 
@@ -227,23 +190,12 @@ const defaultFileStore: SlackFileStore = {
 
 class DefaultSlackWorkspace implements SlackWorkspace {
   readonly directory: SlackDirectory;
-  private readonly userNames = new Map<string, string>();
-  private readonly pendingUserNames = new Map<string, Promise<string>>();
-  private readonly channelNames = new Map<string, string>();
-  private readonly pendingChannelNames = new Map<string, Promise<string>>();
-  private selfUserIdValue?: string;
-  private selfUserIdRequest?: Promise<string>;
 
   constructor(
     private readonly transport: SlackTransport,
     private readonly fileStore: SlackFileStore,
   ) {
-    this.directory = {
-      selfUserId: (signal) => this.resolveSelfUserId(signal),
-      userName: (userId, signal) => this.resolveUserName(userId, signal),
-      channelName: (channelId, signal) =>
-        this.resolveChannelName(channelId, signal),
-    };
+    this.directory = createSlackDirectory(transport);
   }
 
   async execute(
@@ -380,21 +332,24 @@ class DefaultSlackWorkspace implements SlackWorkspace {
     request: SearchOperation,
     options: SlackOperationOptions,
   ): Promise<SlackOperationResult> {
-    const response = await this.transport.get<SearchResponse>("search.messages", {
-      query: {
-        query: request.query,
-        count: request.count ?? 20,
-        sort: request.sort,
-        sort_dir: request.sortDir,
-        page: request.page,
+    const response = await this.transport.get<SearchResponse>(
+      "search.messages",
+      {
+        query: {
+          query: request.query,
+          count: request.count ?? 20,
+          sort: request.sort,
+          sort_dir: request.sortDir,
+          page: request.page,
+        },
+        signal: options.signal,
       },
-      signal: options.signal,
-    });
+    );
     const result = response.messages ?? { matches: [], total: 0 };
     const names = await Promise.all(
       result.matches.map((match) =>
         match.user
-          ? this.resolveUserName(match.user, options.signal)
+          ? this.directory.userName(match.user, options.signal)
           : Promise.resolve(match.username ?? "unknown"),
       ),
     );
@@ -479,7 +434,9 @@ class DefaultSlackWorkspace implements SlackWorkspace {
       { body, signal: options.signal },
     );
     const kind = request.threadTs ? "threaded reply" : "message";
-    const target = request.toUser ? `@${request.toUser} (DM ${channel})` : channel;
+    const target = request.toUser
+      ? `@${request.toUser} (DM ${channel})`
+      : channel;
     return {
       title: "Slack message",
       text: `Slack: ${kind} sent to ${target} (ts: ${response.ts ?? "(unknown)"}).`,
@@ -616,97 +573,10 @@ class DefaultSlackWorkspace implements SlackWorkspace {
     return Promise.all(
       messages.map((message) =>
         message.user
-          ? this.resolveUserName(message.user, signal)
+          ? this.directory.userName(message.user, signal)
           : Promise.resolve(message.username ?? "unknown"),
       ),
     );
-  }
-
-  private resolveSelfUserId(signal?: AbortSignal): Promise<string> {
-    if (this.selfUserIdValue) {
-      return withAbort(Promise.resolve(this.selfUserIdValue), signal);
-    }
-    if (this.selfUserIdRequest) {
-      return withAbort(this.selfUserIdRequest, signal);
-    }
-    const request = this.transport
-      .get<AuthTestResponse>("auth.test")
-      .then((response) => {
-        if (!response.user_id) {
-          throw new Error("Slack auth.test did not return user_id.");
-        }
-        this.selfUserIdValue = response.user_id;
-        return response.user_id;
-      })
-      .finally(() => {
-        this.selfUserIdRequest = undefined;
-      });
-    this.selfUserIdRequest = request;
-    return withAbort(request, signal);
-  }
-
-  private resolveUserName(
-    userId: string,
-    signal?: AbortSignal,
-  ): Promise<string> {
-    const cached = this.userNames.get(userId);
-    if (cached) return withAbort(Promise.resolve(cached), signal);
-    const pending = this.pendingUserNames.get(userId);
-    if (pending) return withAbort(pending, signal);
-
-    const request = this.transport
-      .get<UserInfoResponse>("users.info", {
-        query: { user: userId },
-      })
-      .then((response) => {
-        const user = response.user;
-        const name =
-          user?.profile?.display_name ||
-          user?.profile?.real_name ||
-          user?.real_name ||
-          user?.name ||
-          userId;
-        cacheDirectoryValue(this.userNames, userId, name);
-        return name;
-      })
-      .catch(() => {
-        cacheDirectoryValue(this.userNames, userId, userId);
-        return userId;
-      })
-      .finally(() => {
-        this.pendingUserNames.delete(userId);
-      });
-    this.pendingUserNames.set(userId, request);
-    return withAbort(request, signal);
-  }
-
-  private resolveChannelName(
-    channelId: string,
-    signal?: AbortSignal,
-  ): Promise<string> {
-    const cached = this.channelNames.get(channelId);
-    if (cached) return withAbort(Promise.resolve(cached), signal);
-    const pending = this.pendingChannelNames.get(channelId);
-    if (pending) return withAbort(pending, signal);
-
-    const request = this.transport
-      .get<ChannelInfoResponse>("conversations.info", {
-        query: { channel: channelId },
-      })
-      .then((response) => {
-        const name = response.channel?.name || channelId;
-        cacheDirectoryValue(this.channelNames, channelId, name);
-        return name;
-      })
-      .catch(() => {
-        cacheDirectoryValue(this.channelNames, channelId, channelId);
-        return channelId;
-      })
-      .finally(() => {
-        this.pendingChannelNames.delete(channelId);
-      });
-    this.pendingChannelNames.set(channelId, request);
-    return withAbort(request, signal);
   }
 }
 
@@ -736,41 +606,6 @@ function cancelledPostResult(
   };
 }
 
-function withAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
-  if (!signal) return promise;
-  if (signal.aborted) return Promise.reject(signal.reason);
-  return new Promise<T>((resolve, reject) => {
-    const cleanup = () => signal.removeEventListener("abort", cancel);
-    const cancel = () => {
-      cleanup();
-      reject(signal.reason ?? new DOMException("The operation was aborted", "AbortError"));
-    };
-    signal.addEventListener("abort", cancel, { once: true });
-    void promise.then(
-      (value) => {
-        cleanup();
-        resolve(value);
-      },
-      (error: unknown) => {
-        cleanup();
-        reject(error);
-      },
-    );
-  });
-}
-
-function cacheDirectoryValue(
-  cache: Map<string, string>,
-  key: string,
-  value: string,
-): void {
-  if (!cache.has(key) && cache.size >= MAX_DIRECTORY_ENTRIES) {
-    const oldest = cache.keys().next().value;
-    if (oldest !== undefined) cache.delete(oldest);
-  }
-  cache.set(key, value);
-}
-
 function requireReviewer(options: SlackOperationOptions): SlackWriteReviewer {
   if (!options.reviewer) {
     throw new Error("Slack writes require a review context.");
@@ -784,7 +619,8 @@ function safeDownloadName(file: SlackFileInfo, fallback: string): string {
   const cleaned = leafName
     .replace(/[^A-Za-z0-9._-]+/g, "-")
     .replace(/^\.+/, "");
-  const safeBase = cleaned || fallback.replace(/[^A-Za-z0-9_-]+/g, "-") || "file";
+  const safeBase =
+    cleaned || fallback.replace(/[^A-Za-z0-9_-]+/g, "-") || "file";
   if (safeBase.includes(".")) return safeBase;
   const extension = file.filetype?.replace(/[^A-Za-z0-9]+/g, "");
   return extension ? `${safeBase}.${extension}` : safeBase;
@@ -795,10 +631,4 @@ export function createSlackWorkspace(
   fileStore: SlackFileStore = defaultFileStore,
 ): SlackWorkspace {
   return new DefaultSlackWorkspace(transport, fileStore);
-}
-
-export function createSlackDirectory(
-  transport: SlackTransport = defaultTransport,
-): SlackDirectory {
-  return new DefaultSlackWorkspace(transport, defaultFileStore).directory;
 }

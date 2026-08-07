@@ -1,26 +1,12 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createSlackMe as createSlackExtension } from "../extensions/index";
-
-class FakeSocketClient {
-  readonly start = vi.fn().mockResolvedValue({ ok: true });
-  readonly disconnect = vi.fn().mockResolvedValue(undefined);
-  private readonly listeners = new Map<
-    string,
-    Array<(payload: unknown) => void>
-  >();
-
-  on(event: string, listener: (payload: unknown) => void): this {
-    const listeners = this.listeners.get(event) ?? [];
-    listeners.push(listener);
-    this.listeners.set(event, listeners);
-    return this;
-  }
-
-  emit(event: string, payload?: unknown): void {
-    for (const listener of this.listeners.get(event) ?? []) listener(payload);
-  }
-}
+import type {
+  GlobalSlackInbox,
+  GlobalSlackInboxSnapshot,
+  SlackInboxClientIdentity,
+} from "../lib/global-slack-inbox";
+import type { SlackInboxMessage } from "../lib/slack-events";
 
 interface TestContext {
   hasUI: boolean;
@@ -47,51 +33,70 @@ interface TestTool {
   execute: (...args: unknown[]) => Promise<unknown>;
 }
 
-function slackResponse(body: Record<string, unknown>): Response {
-  return new Response(JSON.stringify(body), {
-    status: 200,
-    headers: { "content-type": "application/json" },
+class FakeInboxClient implements GlobalSlackInbox {
+  readonly close = vi.fn(async () => undefined);
+  readonly connect = vi.fn(async (_identity: SlackInboxClientIdentity) => {
+    this.publish();
   });
+  private readonly listeners = new Set<
+    (snapshot: GlobalSlackInboxSnapshot) => void
+  >();
+  private unread = 1;
+
+  constructor(private readonly messages: SlackInboxMessage[]) {}
+
+  subscribe(
+    listener: (snapshot: GlobalSlackInboxSnapshot) => void,
+  ): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  async status() {
+    return { state: "connected" as const, unread: this.unread };
+  }
+
+  async setListening(enabled: boolean) {
+    return {
+      state: enabled ? ("connected" as const) : ("stopped" as const),
+      unread: this.unread,
+    };
+  }
+
+  async readInbox(limit = 10) {
+    this.unread = 0;
+    this.publish();
+    return this.messages.slice(-limit);
+  }
+
+  async clearInbox() {
+    const count = this.messages.length;
+    this.messages.length = 0;
+    this.unread = 0;
+    this.publish();
+    return count;
+  }
+
+  private publish(): void {
+    const snapshot: GlobalSlackInboxSnapshot = {
+      status: { state: "connected", unread: this.unread },
+    };
+    for (const listener of this.listeners) listener(snapshot);
+  }
 }
 
-describe("Socket Mode extension lifecycle", () => {
+describe("Slack extension lifecycle", () => {
   beforeEach(() => {
     process.env.SLACK_USER_TOKEN = "xoxp-test";
     process.env.SLACK_APP_TOKEN = "xapp-test";
-    process.env.SLACK_LISTEN_CHANNELS = "CWATCHED";
   });
 
   afterEach(() => {
-    vi.unstubAllGlobals();
     delete process.env.SLACK_USER_TOKEN;
     delete process.env.SLACK_APP_TOKEN;
-    delete process.env.SLACK_LISTEN_CHANNELS;
   });
 
   it("keeps inbox messages passive and executes commands without an agent turn", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: string | URL | Request) => {
-        const url = String(input);
-        if (url.includes("auth.test")) {
-          return slackResponse({ ok: true, user_id: "USELF" });
-        }
-        if (url.includes("users.info")) {
-          return slackResponse({
-            ok: true,
-            user: { id: "UOTHER", profile: { display_name: "Alice" } },
-          });
-        }
-        if (url.includes("conversations.info")) {
-          return slackResponse({
-            ok: true,
-            channel: { id: "CWATCHED", name: "engineering" },
-          });
-        }
-        throw new Error(`Unexpected Slack request: ${url}`);
-      }),
-    );
-
     const hooks = new Map<string, Hook[]>();
     const commands = new Map<string, TestCommand>();
     const tools = new Map<string, TestTool>();
@@ -121,26 +126,36 @@ describe("Socket Mode extension lifecycle", () => {
         setEditorText: vi.fn(),
       },
     };
-    const socket = new FakeSocketClient();
     const channelsResult = {
       title: "Slack channels",
       text: "**Channels** (1):\n\n# **engineering** (CWATCHED)",
       details: { operation: "list-channels" as const },
     };
-    const directory = {
-      selfUserId: vi.fn().mockResolvedValue("USELF"),
-      userName: vi.fn().mockResolvedValue("Alice"),
-      channelName: vi.fn().mockResolvedValue("engineering"),
-    };
     const workspace = {
       execute: vi.fn().mockResolvedValue(channelsResult),
-      directory,
+      directory: {
+        selfUserId: vi.fn(),
+        userName: vi.fn(),
+        channelName: vi.fn(),
+      },
     };
     const presenter = {
       present: vi.fn().mockResolvedValue(undefined),
     };
+    const inbox = new FakeInboxClient([
+      {
+        eventId: "EvExtension",
+        channelId: "CWATCHED",
+        channelName: "engineering",
+        userId: "UOTHER",
+        userName: "Alice",
+        text: "<@USELF> hello from Slack",
+        timestamp: "1786020000.001000",
+        isMention: true,
+      },
+    ]);
     createSlackExtension({
-      createSocketClient: () => socket,
+      createGlobalInbox: () => inbox,
       workspace,
       presenter,
     })(pi);
@@ -149,31 +164,10 @@ describe("Socket Mode extension lifecycle", () => {
     const startHook = hooks.get("session_start")?.[0];
     expect(startHook).toBeDefined();
     await startHook?.({ reason: "startup" }, context);
-    await vi.waitFor(() => expect(socket.start).toHaveBeenCalledOnce());
-
-    const event = {
-      type: "message",
-      channel: "CWATCHED",
-      channel_type: "channel",
-      user: "UOTHER",
-      text: "<@USELF> hello from Slack",
-      ts: "1786020000.001000",
-    };
-    socket.emit("message", {
-      ack: vi.fn().mockResolvedValue(undefined),
-      body: { event_id: "EvExtension", event },
-      event,
-    });
-
-    await vi.waitFor(() =>
-      expect(context.ui.setStatus).toHaveBeenCalledWith(
-        "slack-listener",
-        "Slack: 1 unread",
-      ),
+    expect(context.ui.setStatus).toHaveBeenCalledWith(
+      "slack-listener",
+      "Slack: 1 unread",
     );
-    expect(directory.selfUserId).toHaveBeenCalledOnce();
-    expect(directory.userName).toHaveBeenCalledWith("UOTHER");
-    expect(directory.channelName).toHaveBeenCalledWith("CWATCHED");
 
     const command = commands.get("slack");
     expect(command).toBeDefined();
@@ -220,24 +214,23 @@ describe("Socket Mode extension lifecycle", () => {
       { operation: "search", query: "deploy status" },
       { signal: undefined },
     );
-    expect(presenter.present).toHaveBeenNthCalledWith(2, context, channelsResult);
-    expect(sendUserMessage).not.toHaveBeenCalled();
-    expect(context.ui.notify).not.toHaveBeenCalledWith(
-      "Slack command queued until the agent is idle.",
-      "info",
+    expect(presenter.present).toHaveBeenNthCalledWith(
+      2,
+      context,
+      channelsResult,
     );
+    expect(sendUserMessage).not.toHaveBeenCalled();
 
     await command?.handler("wat", context);
     expect(context.ui.notify).toHaveBeenCalledWith(
       expect.stringContaining("Unknown Slack command"),
       "warning",
     );
-    expect(sendUserMessage).not.toHaveBeenCalled();
 
     const shutdownHook = hooks.get("session_shutdown")?.[0];
     expect(shutdownHook).toBeDefined();
     await shutdownHook?.({ reason: "quit" }, context);
-    expect(socket.disconnect).toHaveBeenCalled();
+    expect(inbox.close).toHaveBeenCalledOnce();
     expect(context.ui.setStatus).toHaveBeenLastCalledWith(
       "slack-listener",
       undefined,

@@ -43,16 +43,6 @@ export function formatListenerStatus(status: SlackListenerStatus): string {
   return `Slack: ${state}${unread}`;
 }
 
-export function formatMentionNotification(message: SlackInboxMessage): string {
-  const channel =
-    message.channelName === message.channelId
-      ? message.channelId
-      : `#${message.channelName}`;
-  const text = message.text.replace(/\s+/g, " ").trim();
-  const preview = text.length > 160 ? `${text.slice(0, 159)}…` : text;
-  return `${message.userName} in ${channel}: ${preview}`;
-}
-
 export function formatInboxPrompt(messages: SlackInboxMessage[]): string {
   const payload = messages.map((message) => ({
     event_id: message.eventId,
@@ -62,6 +52,7 @@ export function formatInboxPrompt(messages: SlackInboxMessage[]): string {
     user_name: message.userName,
     timestamp: message.timestamp,
     thread_timestamp: message.threadTimestamp,
+    attention_kind: message.attentionKind,
     text: message.text,
   }));
   return [

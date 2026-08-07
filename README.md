@@ -8,7 +8,7 @@ The extension adds 9 LLM-callable tools that read and write Slack using a **user
 
 Use it when you want an agent to **consume information** from Slack (read feedback, follow issues, search past decisions, pull a thread into a coding session), **post on your behalf** (send a message, reply in a thread, DM someone, edit or delete your own messages), or add reactions. Message writes open in a review dialog before they touch Slack; reactions are applied immediately when the reaction tool runs.
 
-An optional [Socket Mode](https://docs.slack.dev/apis/events-api/using-socket-mode) listener receives public-channel messages in real time. It is deliberately passive: incoming Slack text never triggers an LLM turn automatically. Messages stay in a bounded, in-memory inbox until you explicitly place them in the editor with `/slack inbox` and submit them yourself.
+An optional [Socket Mode](https://docs.slack.dev/apis/events-api/using-socket-mode) sidecar receives public-channel messages in real time. It is deliberately passive: incoming Slack text never triggers an LLM turn automatically. One on-demand sidecar owns the connection and a bounded global in-memory inbox; every running pi displays the same unread count and can open the inbox with `/slack inbox`.
 
 ## Why a user token (and not a bot)
 
@@ -34,25 +34,36 @@ User IDs are resolved to display names (cached), so feedback reads as `**Esteban
 
 ## Passive Socket Mode inbox
 
-Setting `SLACK_APP_TOKEN` enables a session-scoped connection through Slack's official `@slack/socket-mode` client. Each incoming envelope is acknowledged immediately, then filtered locally. The inbox retains:
+Setting `SLACK_APP_TOKEN` enables one on-demand sidecar through Slack's official `@slack/socket-mode` client. The first pi starts it; other pi processes connect over a user-only local socket instead of opening more Slack connections. The sidecar remains alive while any pi client is connected and stops after the final client disconnects and a short grace period.
+
+Each incoming envelope is acknowledged immediately, then filtered locally. The global inbox retains:
 
 - normal public-channel messages that mention your authenticated Slack user;
+- replies by other people in a thread where you previously posted or were mentioned;
 - normal messages from channel IDs listed in `SLACK_LISTEN_CHANNELS`.
 
-It ignores your own posts, bot and system messages, edits, deletes, private channels, and DMs. Mentions produce a toast containing the author, channel, and a short preview. Non-mention messages from watched channels only update the `Slack: N unread` footer.
+It ignores your own posts, bot and system messages, edits, deletes, private channels, DMs, and group DMs. Mentions and participating-thread replies update every pi footer and produce at most one optional Herdr toast containing the author, channel, and a capped one-line preview. Ordinary messages from watched channels update the inbox and footer without a toast.
 
-Connection loss is retried up to six times with capped exponential backoff, and each connection attempt times out after 10 seconds. After the final failure the footer stays at `Slack: error`; run `/slack listen on` to try again. The footer keeps `reconnecting`, `disconnected`, or `error` visible alongside any unread count, and raw Socket Mode SDK logging is suppressed so temporary WebSocket tickets do not reach the console.
+The footer uses pi's composable extension-status surface, so it persists across renders and coexists with indicators such as pi-lens. Connection loss is retried up to six times with capped exponential backoff, and each connection attempt times out after 10 seconds. After the final failure every footer stays at `Slack: error`; run `/slack listen on` from any pi to try again.
 
 The safety boundary is explicit:
 
 - Slack message text is treated as **untrusted external content**, never as an instruction;
 - no event calls `sendUserMessage` or starts an agent turn;
-- the inbox holds at most 100 messages and is never written to the pi session or another file;
-- `/slack inbox [N]` marks the selected messages read and places structured JSON in the editor, where you can inspect or amend it before pressing Enter;
-- `/slack inbox clear` removes all retained messages;
-- reload, session replacement, and exit disconnect the socket and discard the inbox.
+- the global inbox holds at most 100 messages and is never written to a pi session or another file;
+- `/slack inbox [N]` from any pi marks only the displayed messages read globally and places structured JSON in that pi's editor for review;
+- `/slack inbox clear` removes all retained messages globally;
+- an individual pi reload or exit does not discard the inbox while another client remains connected;
+- sidecar exit discards the inbox because its state is intentionally memory-only.
 
-`SLACK_LISTEN_CHANNELS` accepts comma- or whitespace-separated channel IDs. Leave it unset for mention-only behavior. Use `slack_list_channels` or `/slack channels` to find IDs.
+When pi runs inside Herdr, the sidecar uses the local Herdr socket advertised by the pi integration. Herdr remains optional: without it, footer fan-out and the global inbox still work, but there is no foreground toast. To enable Herdr's in-app toast surface:
+
+```toml
+[ui.toast]
+delivery = "herdr"
+```
+
+`SLACK_LISTEN_CHANNELS` accepts comma- or whitespace-separated channel IDs. Leave it unset for mention-and-thread-only behavior. Use `slack_list_channels` or `/slack channels` to find IDs.
 
 ## Write tools & review
 
@@ -197,7 +208,7 @@ Natural-language Slack requests still use the LLM-callable tools. The bundled `s
 | `/slack react <channel> <ts> <emoji>` | Add a reaction immediately |
 | `/slack inbox [N]` | Place the latest 1-100 retained messages in the editor without submitting them |
 | `/slack inbox clear` | Empty the in-memory inbox |
-| `/slack listen status\|on\|off` | Inspect or control the session's Socket Mode connection |
+| `/slack listen status\|on\|off` | Inspect or control the global Socket Mode connection |
 | `/slack config` | Settings modal (write review gate) |
 | `/slack confirm on\|off` | Toggle write review (delete stays guarded) |
 | `/slack headless on\|off` | Toggle the headless write opt-in |
@@ -206,7 +217,7 @@ Natural-language Slack requests still use the LLM-callable tools. The bundled `s
 
 - **Credential scope**: the user token grants workspace access as you, while the app-level token opens Socket Mode connections. Treat both like credentials - `0600` on any file they land in, never commit them, and rotate either token if leaked.
 - **Token rotation**: if Slack invalidates the user token (e.g. you revoke the app or change your password), calls return `invalid_auth`. Re-install the app and update `SLACK_USER_TOKEN`. Replace `SLACK_APP_TOKEN` separately if its app-level token is revoked.
-- **Concurrent listeners**: run one active pi listener per Slack app when you need a complete inbox. Slack can distribute envelopes across multiple simultaneous Socket Mode connections rather than sending every envelope to every process.
+- **Global sidecar**: running pi processes with the same Slack credentials share one sidecar, one Socket Mode connection, and one ephemeral inbox. The local socket name contains only a credential fingerprint, never either token.
 - **Rate limits**: Slack returns `429` with a `Retry-After` header on rate limit; this extension surfaces the retry hint in the error text. Bulk reads (hundreds of channels) should page via the returned cursor. Writes (`chat.postMessage`) are limited to ~1/sec per channel - avoid tight-loop bulk posting.
 - **DM author names**: DM message payloads carry the other user's ID; the extension resolves it via `users.info`. Your own messages show as your display name.
 
@@ -214,8 +225,9 @@ Natural-language Slack requests still use the LLM-callable tools. The bundled `s
 
 ```bash
 npm install
-npm run typecheck   # tsc --noEmit
-npm test            # vitest run
+npm run build:sidecar # rebuild dist/slack-sidecar.mjs
+npm run typecheck     # tsc --noEmit
+npm test              # rebuild sidecar, then vitest run
 npm run test:watch
 ```
 

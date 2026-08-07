@@ -1,5 +1,50 @@
 # Changelog
 
+## 1.3.0 — 2026-08-07
+
+### Added
+
+- On-demand sidecar process owning one Socket Mode connection and one global,
+  memory-only inbox for every running pi process with the same Slack identity.
+- User-only local IPC with protocol versioning, credential-fingerprinted socket
+  names, process locking, reconnect/relaunch behavior, and idle shutdown after
+  the final pi client disconnects.
+- Persistent `Slack: N unread` status in every pi footer through the composable
+  `setStatus` surface.
+- Optional Herdr integration that routes one foreground in-app toast containing
+  sender, channel, and a capped display-only preview. Herdr is discovered from
+  the standard pi integration environment and remains optional.
+- Public-channel thread follow-ups when the authenticated user previously
+  posted or was mentioned in the thread. Unknown threads are inspected through
+  `conversations.replies` and participation decisions are cached.
+- Generated Node 20 sidecar bundle and deterministic `build:sidecar` script.
+
+### Changed
+
+- `/slack inbox` now reads one global inbox from any pi. Displayed messages are
+  marked read globally and every footer updates immediately; retained messages
+  remain until clearing or bounded eviction.
+- `/slack listen status|on|off` now controls the global connection.
+- Socket Mode connection ownership, directory lookup, thread tracking, inbox
+  retention, and Herdr notification delivery moved out of individual pi
+  extension processes and behind the `GlobalSlackInbox` seam.
+- An individual pi reload or exit no longer loses inbox state while another pi
+  client remains connected. Sidecar state is still deliberately ephemeral and
+  is discarded when the sidecar exits.
+
+### Fixed
+
+- Multiple concurrent pi sessions no longer open competing Socket Mode
+  connections or receive Slack events at effectively random display points.
+- Mention and thread notifications no longer scroll away with the chat buffer;
+  unread state remains in the footer until viewed globally.
+- IPC relaunches now use bounded exponential backoff and end in a visible error
+  state instead of spawning sidecars indefinitely after a permanent failure.
+- Stale locks recover safely after PID reuse, shared-directory socket overrides
+  are rejected, and missing credentials or bundles fail with actionable errors.
+- Thread-history classification retries Slack rate limits and transient server
+  failures before deciding whether to notify.
+
 ## 1.2.0 — 2026-08-07
 
 ### Added

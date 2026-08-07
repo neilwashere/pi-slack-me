@@ -2,7 +2,6 @@ import type {
   ExtensionAPI,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { LogLevel, SocketModeClient, type Logger } from "@slack/socket-mode";
 import { hasSlackToken } from "../lib/auth";
 import {
   ALLOW_HEADLESS_WRITE_FLAG,
@@ -10,15 +9,14 @@ import {
   CONFIRM_WRITE_FLAG,
   CONFIRM_WRITE_FLAG_DESCRIPTION,
 } from "../lib/confirm";
+import {
+  createDefaultGlobalSlackInboxClient,
+  type GlobalSlackInbox,
+  type SlackInboxClientIdentity,
+} from "../lib/global-slack-inbox";
 import { createSlackCommand } from "../lib/slack-command";
 import {
-  SlackEventListener,
-  type SocketModeClientLike,
-} from "../lib/slack-events";
-import {
   formatListenerStatus,
-  formatMentionNotification,
-  parseWatchedChannels,
   SLACK_LISTENER_STATUS_KEY,
 } from "../lib/slack-inbox";
 import {
@@ -32,33 +30,23 @@ import {
 } from "../lib/slack-workspace";
 
 export interface SlackMeDependencies {
-  createSocketClient: (appToken: string) => SocketModeClientLike;
+  createGlobalInbox?: () => GlobalSlackInbox;
   workspace?: SlackWorkspace;
   presenter?: SlackResultPresenter;
 }
 
-const silentSocketLogger: Logger = {
-  debug: () => undefined,
-  info: () => undefined,
-  warn: () => undefined,
-  error: () => undefined,
-  setLevel: () => undefined,
-  getLevel: () => LogLevel.ERROR,
-  setName: () => undefined,
-};
-
-const defaultDependencies: SlackMeDependencies = {
-  createSocketClient: (appToken) =>
-    new SocketModeClient({
-      appToken,
-      logger: silentSocketLogger,
-      autoReconnectEnabled: false,
-      clientOptions: { retryConfig: { retries: 0 }, timeout: 10_000 },
-    }),
-};
+function clientIdentity(): SlackInboxClientIdentity {
+  return {
+    processId: process.pid,
+    sessionId: process.env.PI_SESSION_ID,
+    sessionPath: process.env.PI_SESSION_FILE,
+    herdrPaneId: process.env.HERDR_PANE_ID,
+    herdrSocketPath: process.env.HERDR_SOCKET_PATH,
+  };
+}
 
 export function createSlackMe(
-  dependencies: SlackMeDependencies = defaultDependencies,
+  dependencies: SlackMeDependencies = {},
 ): (pi: ExtensionAPI) => void {
   return (pi) => registerSlackMe(pi, dependencies);
 }
@@ -67,34 +55,44 @@ function registerSlackMe(
   pi: ExtensionAPI,
   dependencies: SlackMeDependencies,
 ): void {
-  let listener: SlackEventListener | undefined;
+  let inbox: GlobalSlackInbox | undefined;
+  let unsubscribeInbox: (() => void) | undefined;
+  let connectPromise: Promise<GlobalSlackInbox | undefined> | undefined;
   const workspace = dependencies.workspace ?? createSlackWorkspace();
   const presenter = dependencies.presenter ?? createSlackResultPresenter();
 
-  const ensureListener = (
+  const ensureInbox = (
     ctx: ExtensionContext,
-  ): SlackEventListener | undefined => {
-    if (listener) return listener;
+  ): Promise<GlobalSlackInbox | undefined> => {
     const appToken = process.env.SLACK_APP_TOKEN?.trim();
-    if (!appToken) return undefined;
-    listener = new SlackEventListener({
-      socket: dependencies.createSocketClient(appToken),
-      directory: workspace.directory,
-      watchedChannels: parseWatchedChannels(process.env.SLACK_LISTEN_CHANNELS),
-      onStatusChange: (status) =>
+    if (!appToken) return Promise.resolve(undefined);
+    if (connectPromise) return connectPromise;
+    if (!inbox) {
+      const created =
+        dependencies.createGlobalInbox?.() ??
+        createDefaultGlobalSlackInboxClient();
+      inbox = created;
+      unsubscribeInbox = created.subscribe((snapshot) =>
         ctx.ui.setStatus(
           SLACK_LISTENER_STATUS_KEY,
-          formatListenerStatus(status),
+          formatListenerStatus(snapshot.status),
         ),
-      onMention: (message) =>
-        ctx.ui.notify(formatMentionNotification(message), "info"),
-      onError: (message) => ctx.ui.notify(message, "warning"),
-    });
-    return listener;
+      );
+    }
+    const current = inbox;
+    connectPromise = current.connect(clientIdentity()).then(
+      () => {
+        connectPromise = undefined;
+        return current;
+      },
+      (error: unknown) => {
+        connectPromise = undefined;
+        throw error;
+      },
+    );
+    return connectPromise;
   };
 
-  // Pi flags expose CLI defaults, while live command toggles are file-backed
-  // because the extension interface has no runtime flag setter.
   pi.registerFlag(CONFIRM_WRITE_FLAG, {
     description: CONFIRM_WRITE_FLAG_DESCRIPTION,
     type: "boolean",
@@ -112,28 +110,33 @@ function registerSlackMe(
     createSlackCommand({
       workspace,
       presenter,
-      getListener: () => listener,
-      ensureListener,
+      ensureInbox,
     }),
   );
 
-  pi.on("session_start", (_event, ctx) => {
+  pi.on("session_start", async (_event, ctx) => {
     if (!ctx.hasUI || !hasSlackToken()) return;
-    const current = ensureListener(ctx);
-    if (!current) return;
-    void current.start().catch(() => undefined);
+    try {
+      await ensureInbox(ctx);
+    } catch (error) {
+      ctx.ui.setStatus(
+        SLACK_LISTENER_STATUS_KEY,
+        formatListenerStatus({ state: "error", unread: 0 }),
+      );
+      ctx.ui.notify(
+        error instanceof Error ? error.message : String(error),
+        "warning",
+      );
+    }
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
-    const current = listener;
-    listener = undefined;
-    if (current) {
-      try {
-        await current.stop();
-      } catch {
-        ctx.ui.notify("Slack Socket Mode failed to stop cleanly.", "warning");
-      }
-    }
+    unsubscribeInbox?.();
+    unsubscribeInbox = undefined;
+    const current = inbox;
+    inbox = undefined;
+    connectPromise = undefined;
+    await current?.close();
     ctx.ui.setStatus(SLACK_LISTENER_STATUS_KEY, undefined);
   });
 }

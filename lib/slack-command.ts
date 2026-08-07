@@ -25,11 +25,8 @@ import {
   type SlackCommandIntent,
 } from "./slack-command-parser";
 export { parseSlackCommand };
-import type { SlackEventListener } from "./slack-events";
-import {
-  formatInboxPrompt,
-  formatListenerStatus,
-} from "./slack-inbox";
+import type { GlobalSlackInbox } from "./global-slack-inbox";
+import { formatInboxPrompt, formatListenerStatus } from "./slack-inbox";
 import type { SlackResultPresenter } from "./slack-presenter";
 import type {
   SlackOperation,
@@ -41,16 +38,17 @@ import { createSlackWriteReviewer } from "./slack-write-review";
 const USAGE =
   "/slack channels [types] | dms | read <channel> [N] | thread <channel> <ts> | search <query> | download <file_id> | post <channel> <text> | dm <user> <text> | reply <channel> <ts> <text> | edit <channel> <ts> <text> | delete <channel> <ts> | react <channel> <ts> <emoji> | inbox [N|clear] | listen status|on|off | config | confirm on|off | headless on|off";
 
-type SlackListenerControl = Pick<
-  SlackEventListener,
-  "start" | "stop" | "status" | "readInbox" | "clearInbox"
+type SlackInboxControl = Pick<
+  GlobalSlackInbox,
+  "status" | "setListening" | "readInbox" | "clearInbox"
 >;
 
 export interface SlackCommandDependencies {
   workspace: SlackWorkspace;
   presenter: SlackResultPresenter;
-  getListener(): SlackListenerControl | undefined;
-  ensureListener(ctx: ExtensionCommandContext): SlackListenerControl | undefined;
+  ensureInbox(
+    ctx: ExtensionCommandContext,
+  ): Promise<SlackInboxControl | undefined>;
 }
 
 export interface SlackCommandDefinition {
@@ -78,34 +76,38 @@ async function runOperation(
   }
 }
 
-function showInbox(
+async function showInbox(
   ctx: ExtensionCommandContext,
   dependencies: SlackCommandDependencies,
   intent: Extract<SlackCommandIntent, { kind: "inbox" }>,
-): void {
-  const listener = dependencies.getListener();
-  if (!listener) {
-    warning(
-      ctx,
-      "Slack inbox is not active. Set SLACK_APP_TOKEN and restart pi, or run /slack listen on.",
+): Promise<void> {
+  try {
+    const inbox = await dependencies.ensureInbox(ctx);
+    if (!inbox) {
+      warning(
+        ctx,
+        "Slack inbox is not active. Set SLACK_APP_TOKEN and restart pi, or run /slack listen on.",
+      );
+      return;
+    }
+    if (intent.action === "clear") {
+      const count = await inbox.clearInbox();
+      ctx.ui.notify(`Cleared ${count} Slack inbox message(s).`, "info");
+      return;
+    }
+    const messages = await inbox.readInbox(intent.limit);
+    if (messages.length === 0) {
+      ctx.ui.notify("Slack inbox is empty.", "info");
+      return;
+    }
+    ctx.ui.setEditorText(formatInboxPrompt(messages));
+    ctx.ui.notify(
+      "Slack inbox loaded into the input editor. Review it, then press Enter to send it to the agent.",
+      "info",
     );
-    return;
+  } catch (error) {
+    warning(ctx, errorText(error));
   }
-  if (intent.action === "clear") {
-    const count = listener.clearInbox();
-    ctx.ui.notify(`Cleared ${count} Slack inbox message(s).`, "info");
-    return;
-  }
-  const messages = listener.readInbox(intent.limit);
-  if (messages.length === 0) {
-    ctx.ui.notify("Slack inbox is empty.", "info");
-    return;
-  }
-  ctx.ui.setEditorText(formatInboxPrompt(messages));
-  ctx.ui.notify(
-    "Slack inbox loaded into the input editor. Review it, then press Enter to send it to the agent.",
-    "info",
-  );
 }
 
 async function controlListener(
@@ -113,26 +115,23 @@ async function controlListener(
   dependencies: SlackCommandDependencies,
   action: "status" | "on" | "off",
 ): Promise<void> {
-  const listener = dependencies.ensureListener(ctx);
-  if (!listener) {
-    warning(
-      ctx,
-      "Slack Socket Mode is not configured. Set SLACK_APP_TOKEN=xapp-... and restart pi.",
-    );
-    return;
-  }
-  if (action === "status") {
-    ctx.ui.notify(formatListenerStatus(listener.status()), "info");
-    return;
-  }
   try {
-    if (action === "on") {
-      await listener.start();
-      if (listener.status().state === "connected") {
-        ctx.ui.notify("Slack Socket Mode connected.", "info");
-      }
-    } else {
-      await listener.stop();
+    const inbox = await dependencies.ensureInbox(ctx);
+    if (!inbox) {
+      warning(
+        ctx,
+        "Slack Socket Mode is not configured. Set SLACK_APP_TOKEN=xapp-... and restart pi.",
+      );
+      return;
+    }
+    if (action === "status") {
+      ctx.ui.notify(formatListenerStatus(await inbox.status()), "info");
+      return;
+    }
+    const status = await inbox.setListening(action === "on");
+    if (action === "on" && status.state === "connected") {
+      ctx.ui.notify("Slack Socket Mode connected.", "info");
+    } else if (action === "off") {
       ctx.ui.notify("Slack Socket Mode stopped.", "info");
     }
   } catch (error) {
@@ -145,7 +144,8 @@ function persistToggle(
   kind: "confirm" | "headless",
   enabled: boolean,
 ): void {
-  const flag = kind === "confirm" ? CONFIRM_WRITE_FLAG : ALLOW_HEADLESS_WRITE_FLAG;
+  const flag =
+    kind === "confirm" ? CONFIRM_WRITE_FLAG : ALLOW_HEADLESS_WRITE_FLAG;
   const saved =
     kind === "confirm"
       ? setConfirmWriteEnabled(enabled)
@@ -154,7 +154,8 @@ function persistToggle(
     ctx.ui.notify(`Failed to persist ${flag} (disk write failed).`, "error");
     return;
   }
-  const guardedDelete = kind === "confirm" ? " (delete stays guarded regardless.)" : "";
+  const guardedDelete =
+    kind === "confirm" ? " (delete stays guarded regardless.)" : "";
   ctx.ui.notify(`${flag}: ${enabled ? "on" : "off"}.${guardedDelete}`, "info");
 }
 
@@ -235,15 +236,10 @@ async function handleIntent(
       warning(ctx, intent.message);
       return;
     case "operation":
-      await runOperation(
-        ctx,
-        dependencies,
-        intent.operation,
-        intent.reviewed,
-      );
+      await runOperation(ctx, dependencies, intent.operation, intent.reviewed);
       return;
     case "inbox":
-      showInbox(ctx, dependencies, intent);
+      await showInbox(ctx, dependencies, intent);
       return;
     case "listen":
       await controlListener(ctx, dependencies, intent.action);

@@ -1,7 +1,4 @@
-import {
-  createSlackDirectory,
-  type SlackDirectory,
-} from "./slack-workspace";
+import { createSlackDirectory, type SlackDirectory } from "./slack-directory";
 
 const MAX_INBOX_MESSAGES = 100;
 const MAX_SEEN_EVENT_IDS = 1_000;
@@ -12,9 +9,7 @@ const SOCKET_START_TIMEOUT_MS = 10_000;
 const DISCONNECT_RETRY_DELAY_MS = 1_000;
 const STOP_TIMEOUT_MS = 5_000;
 
-type TimeoutResult<T> =
-  | { timedOut: true }
-  | { timedOut: false; value: T };
+type TimeoutResult<T> = { timedOut: true } | { timedOut: false; value: T };
 
 async function completionResult<T>(
   promise: Promise<T>,
@@ -41,10 +36,18 @@ async function waitWithTimeout<T>(
 }
 
 function sanitizeSocketError(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error);
+  const rawMessage =
+    error instanceof Error ? error.message : String(error ?? "");
+  const message = rawMessage.trim()
+    ? rawMessage
+    : "connection failed without error details.";
   return message
     .replace(/\b(?:xapp|xox[a-z]?)-[a-z0-9-]+\b/gi, "[REDACTED]")
     .replace(/\bwss:\/\/\S+/gi, "[REDACTED]");
+}
+
+function socketFailure(error: unknown): Error {
+  return new Error(sanitizeSocketError(error));
 }
 
 export interface SocketModeClientLike {
@@ -63,6 +66,7 @@ export interface SlackInboxMessage {
   timestamp: string;
   threadTimestamp?: string;
   isMention: boolean;
+  attentionKind?: "mention" | "thread-reply";
 }
 
 export type SlackListenerState =
@@ -78,12 +82,23 @@ export interface SlackListenerStatus {
   unread: number;
 }
 
+export interface SlackThreadTracker {
+  mark(channel: string, threadTimestamp: string): void;
+  participates(
+    channel: string,
+    threadTimestamp: string,
+    selfUserId: string,
+  ): Promise<boolean>;
+}
+
 export interface SlackEventListenerOptions {
   socket: SocketModeClientLike;
   directory?: SlackDirectory;
+  threadTracker?: SlackThreadTracker;
   watchedChannels?: Iterable<string>;
   onStatusChange?: (status: SlackListenerStatus) => void;
   onMention?: (message: SlackInboxMessage) => void;
+  onAttention?: (message: SlackInboxMessage) => void;
   onError?: (message: string) => void;
 }
 
@@ -132,15 +147,27 @@ interface StoredInboxMessage extends SlackInboxMessage {
   unread: boolean;
 }
 
+type MessageDisposition = SlackInboxMessage["attentionKind"] | "watched";
+
+interface EnqueueMessage {
+  event: OrdinaryPublicMessage;
+  eventId: string;
+  isMention: boolean;
+  attentionKind: SlackInboxMessage["attentionKind"];
+  lifecycle: number;
+}
+
 export class SlackEventListener {
   private readonly socket: SocketModeClientLike;
   private readonly watchedChannels: Set<string>;
   private readonly seenEventIds = new Set<string>();
   private readonly seenEventOrder: string[] = [];
   private readonly directory: SlackDirectory;
+  private readonly threadTracker?: SlackThreadTracker;
   private readonly inbox: StoredInboxMessage[] = [];
   private readonly onStatusChange?: (status: SlackListenerStatus) => void;
   private readonly onMention?: (message: SlackInboxMessage) => void;
+  private readonly onAttention?: (message: SlackInboxMessage) => void;
   private readonly onError?: (message: string) => void;
   private state: SlackListenerState = "stopped";
   private selfUserId?: string;
@@ -156,9 +183,11 @@ export class SlackEventListener {
   constructor(options: SlackEventListenerOptions) {
     this.socket = options.socket;
     this.directory = options.directory ?? createSlackDirectory();
+    this.threadTracker = options.threadTracker;
     this.watchedChannels = new Set(options.watchedChannels ?? []);
     this.onStatusChange = options.onStatusChange;
     this.onMention = options.onMention;
+    this.onAttention = options.onAttention;
     this.onError = options.onError;
     this.socket.on("message", (payload) => {
       void this.receive(payload).catch((error) => {
@@ -288,7 +317,11 @@ export class SlackEventListener {
   }
 
   readInbox(limit = 10): SlackInboxMessage[] {
-    const messages = this.inbox.slice(-limit);
+    const boundedLimit = Number.isFinite(limit)
+      ? Math.min(MAX_INBOX_MESSAGES, Math.max(0, Math.trunc(limit)))
+      : 10;
+    if (boundedLimit === 0) return [];
+    const messages = this.inbox.slice(-boundedLimit);
     for (const message of messages) message.unread = false;
     if (messages.length > 0) this.emitStatus();
     return messages.map(({ unread: _unread, ...message }) => message);
@@ -327,10 +360,11 @@ export class SlackEventListener {
       this.connectionErrorReported = false;
       this.setState("connected");
     } catch (error) {
+      const failure = socketFailure(error);
       if (this.desiredRunning && lifecycle === this.lifecycle) {
-        this.handleConnectionError(error);
+        this.handleConnectionError(failure);
       }
-      throw error;
+      throw failure;
     }
   }
 
@@ -338,10 +372,7 @@ export class SlackEventListener {
     const socketStart = this.socket.start();
     this.socketStartPromise = socketStart;
     const trackedSocketStart = this.trackSocketStart(socketStart);
-    const outcome = await waitWithTimeout(
-      socketStart,
-      SOCKET_START_TIMEOUT_MS,
-    );
+    const outcome = await waitWithTimeout(socketStart, SOCKET_START_TIMEOUT_MS);
     if (!outcome.timedOut) return;
 
     const cleanup = Promise.all([
@@ -384,7 +415,8 @@ export class SlackEventListener {
   }
 
   private scheduleReconnect(): void {
-    if (!this.desiredRunning || this.reconnectTimer || this.startPromise) return;
+    if (!this.desiredRunning || this.reconnectTimer || this.startPromise)
+      return;
     if (this.reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
       this.setState("error");
       return;
@@ -428,14 +460,63 @@ export class SlackEventListener {
     const event = envelope.event;
     if (!isOrdinaryPublicMessage(event)) return;
     const selfUserId = this.selfUserId;
-    if (!selfUserId || event.user === selfUserId) return;
-
-    const isMention = event.text.includes(`<@${selfUserId}>`);
-    if (!isMention && !this.watchedChannels.has(event.channel)) return;
+    if (!selfUserId) return;
+    if (event.user === selfUserId) {
+      this.threadTracker?.mark(event.channel, event.thread_ts ?? event.ts);
+      return;
+    }
 
     const eventId = envelope.body?.event_id ?? `${event.channel}:${event.ts}`;
     if (!this.rememberEvent(eventId)) return;
-    await this.enqueue(event, eventId, isMention, lifecycle);
+    const disposition = await this.classify(event, selfUserId);
+    if (!disposition) return;
+    const attentionKind = disposition === "watched" ? undefined : disposition;
+    await this.enqueue({
+      event,
+      eventId,
+      isMention: disposition === "mention",
+      attentionKind,
+      lifecycle,
+    });
+  }
+
+  private async classify(
+    event: OrdinaryPublicMessage,
+    selfUserId: string,
+  ): Promise<MessageDisposition | undefined> {
+    if (event.text.includes(`<@${selfUserId}>`)) {
+      this.threadTracker?.mark(event.channel, event.thread_ts ?? event.ts);
+      return "mention";
+    }
+    if (
+      event.thread_ts &&
+      (await this.participatesInThread(
+        event.channel,
+        event.thread_ts,
+        selfUserId,
+      ))
+    ) {
+      return "thread-reply";
+    }
+    return this.watchedChannels.has(event.channel) ? "watched" : undefined;
+  }
+
+  private async participatesInThread(
+    channel: string,
+    threadTimestamp: string,
+    selfUserId: string,
+  ): Promise<boolean> {
+    if (!this.threadTracker) return false;
+    try {
+      return await this.threadTracker.participates(
+        channel,
+        threadTimestamp,
+        selfUserId,
+      );
+    } catch (error) {
+      this.reportError(error);
+      return false;
+    }
   }
 
   private async acknowledge(envelope: SocketModeMessage): Promise<void> {
@@ -457,12 +538,13 @@ export class SlackEventListener {
     return true;
   }
 
-  private async enqueue(
-    event: OrdinaryPublicMessage,
-    eventId: string,
-    isMention: boolean,
-    lifecycle: number,
-  ): Promise<void> {
+  private async enqueue({
+    event,
+    eventId,
+    isMention,
+    attentionKind,
+    lifecycle,
+  }: EnqueueMessage): Promise<void> {
     const [userName, channelName] = await Promise.all([
       this.directory.userName(event.user),
       this.directory.channelName(event.channel),
@@ -479,6 +561,7 @@ export class SlackEventListener {
       timestamp: event.ts,
       threadTimestamp: event.thread_ts,
       isMention,
+      attentionKind,
       unread: true,
     };
     this.inbox.push(message);
@@ -487,10 +570,9 @@ export class SlackEventListener {
     );
     if (this.inbox.length > MAX_INBOX_MESSAGES) this.inbox.shift();
     this.emitStatus();
-    if (isMention) {
-      const { unread: _unread, ...publicMessage } = message;
-      this.onMention?.(publicMessage);
-    }
+    const { unread: _unread, ...publicMessage } = message;
+    if (isMention) this.onMention?.(publicMessage);
+    if (attentionKind) this.onAttention?.(publicMessage);
   }
 
   private setState(state: SlackListenerState): void {
