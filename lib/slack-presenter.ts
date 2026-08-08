@@ -129,18 +129,10 @@ export function createSlackResultPresenter(): SlackResultPresenter {
         ctx.ui.notify(`${result.title}\n\n${result.text}`, "info");
         return;
       }
+      await ctx.waitForIdle();
       const action = await ctx.ui.custom<ResultAction>(
         (_tui, theme, _keybindings, done) =>
           new SlackResultView(result.title, result.text, theme, done),
-        {
-          overlay: true,
-          overlayOptions: {
-            width: "85%",
-            minWidth: 50,
-            maxHeight: "80%",
-            margin: 1,
-          },
-        },
       );
       if (action !== "editor") return;
       ctx.ui.setEditorText(editorText(result));

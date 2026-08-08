@@ -6,6 +6,10 @@ describe("Slack command result presenter", () => {
   it("shows TUI results ephemerally and only puts them in the editor on explicit input", async () => {
     const setEditorText = vi.fn();
     const notify = vi.fn();
+    const events: string[] = [];
+    const waitForIdle = vi.fn(async () => {
+      events.push("idle");
+    });
     const custom = vi.fn(
       (
         factory: (
@@ -17,6 +21,7 @@ describe("Slack command result presenter", () => {
           | { handleInput?: (input: string) => void }
           | Promise<{ handleInput?: (input: string) => void }>,
       ) => {
+        events.push("custom");
         return new Promise<string>((resolve) => {
           void Promise.resolve(
             factory(
@@ -34,6 +39,7 @@ describe("Slack command result presenter", () => {
     );
     const context = {
       mode: "tui",
+      waitForIdle,
       ui: {
         custom,
         setEditorText,
@@ -48,10 +54,9 @@ describe("Slack command result presenter", () => {
       details: { operation: "search", total: 1 },
     });
 
-    expect(custom).toHaveBeenCalledWith(
-      expect.any(Function),
-      expect.objectContaining({ overlay: true }),
-    );
+    expect(waitForIdle).toHaveBeenCalledOnce();
+    expect(events.slice(0, 2)).toEqual(["idle", "custom"]);
+    expect(custom).toHaveBeenCalledWith(expect.any(Function));
     expect(setEditorText).toHaveBeenCalledWith(
       expect.stringContaining("untrusted external content"),
     );
