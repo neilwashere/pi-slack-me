@@ -779,6 +779,62 @@ describe("SlackEventListener", () => {
     expect(listener.status().state).toBe("stopped");
   });
 
+  it("retries a failed initial connection while listening remains enabled", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | Request) => {
+        const url = String(input);
+        if (url.includes("auth.test")) {
+          return slackResponse({ ok: true, user_id: "USELF" });
+        }
+        throw new Error(`Unexpected Slack request: ${url}`);
+      }),
+    );
+
+    const socket = new FakeSocketClient();
+    socket.start
+      .mockRejectedValueOnce(new Error("temporary startup failure"))
+      .mockResolvedValueOnce({ ok: true });
+    const listener = new SlackEventListener({ socket });
+
+    await expect(listener.start()).rejects.toThrow("temporary startup failure");
+    expect(listener.status().state).toBe("reconnecting");
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(socket.start).toHaveBeenCalledTimes(2);
+    expect(listener.status().state).toBe("connected");
+    await listener.stop();
+  });
+
+  it("reconnects after a socket error without waiting for a disconnect event", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | Request) => {
+        const url = String(input);
+        if (url.includes("auth.test")) {
+          return slackResponse({ ok: true, user_id: "USELF" });
+        }
+        throw new Error(`Unexpected Slack request: ${url}`);
+      }),
+    );
+
+    const socket = new FakeSocketClient();
+    const onError = vi.fn();
+    const listener = new SlackEventListener({ socket, onError });
+    await listener.start();
+
+    socket.emit("error", new Error("connection failed"));
+    expect(onError).toHaveBeenCalledOnce();
+    expect(listener.status().state).toBe("reconnecting");
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(socket.start).toHaveBeenCalledTimes(2);
+    expect(listener.status().state).toBe("connected");
+    await listener.stop();
+  });
+
   it("retries dropped connections without leaking rejected reconnect attempts", async () => {
     vi.useFakeTimers();
     vi.stubGlobal(
@@ -823,7 +879,50 @@ describe("SlackEventListener", () => {
     await listener.stop();
   });
 
-  it("stops retrying and warning after six failed reconnect attempts", async () => {
+  it("recovers after an outage exceeds the initial reconnect backoff", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | Request) => {
+        const url = String(input);
+        if (url.includes("auth.test")) {
+          return slackResponse({ ok: true, user_id: "USELF" });
+        }
+        throw new Error(`Unexpected Slack request: ${url}`);
+      }),
+    );
+
+    const socket = new FakeSocketClient();
+    let failuresRemaining = 6;
+    socket.start
+      .mockResolvedValueOnce({ ok: true })
+      .mockImplementation(async () => {
+        if (failuresRemaining > 0) {
+          failuresRemaining -= 1;
+          throw new Error("extended outage");
+        }
+        return { ok: true };
+      });
+    const onError = vi.fn();
+    const listener = new SlackEventListener({ socket, onError });
+    await listener.start();
+
+    socket.emit("disconnected");
+    for (const delay of [1_000, 2_000, 4_000, 8_000, 16_000, 30_000]) {
+      await vi.advanceTimersByTimeAsync(delay);
+    }
+
+    expect(socket.start).toHaveBeenCalledTimes(7);
+    expect(onError).toHaveBeenCalledOnce();
+    expect(listener.status().state).toBe("reconnecting");
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(socket.start).toHaveBeenCalledTimes(8);
+    expect(listener.status().state).toBe("connected");
+    await listener.stop();
+  });
+
+  it("cancels capped reconnect backoff when listening stops", async () => {
     vi.useFakeTimers();
     vi.stubGlobal(
       "fetch",
@@ -839,25 +938,20 @@ describe("SlackEventListener", () => {
     const socket = new FakeSocketClient();
     socket.start
       .mockResolvedValueOnce({ ok: true })
-      .mockRejectedValue(new Error("permanent outage"));
-    const onError = vi.fn();
-    const listener = new SlackEventListener({ socket, onError });
+      .mockRejectedValue(new Error("ongoing outage"));
+    const listener = new SlackEventListener({ socket });
     await listener.start();
 
     socket.emit("disconnected");
     for (const delay of [1_000, 2_000, 4_000, 8_000, 16_000, 30_000]) {
       await vi.advanceTimersByTimeAsync(delay);
     }
+    expect(listener.status().state).toBe("reconnecting");
 
-    expect(socket.start).toHaveBeenCalledTimes(7);
-    expect(onError).toHaveBeenCalledOnce();
-    expect(listener.status().state).toBe("error");
-
-    socket.emit("disconnected");
-    expect(listener.status().state).toBe("error");
+    await listener.stop();
     await vi.advanceTimersByTimeAsync(120_000);
     expect(socket.start).toHaveBeenCalledTimes(7);
-    await listener.stop();
+    expect(listener.status().state).toBe("stopped");
   });
 
   it("times out stalled socket reconnects before continuing backoff", async () => {
@@ -1135,6 +1229,7 @@ describe("SlackEventListener", () => {
   });
 
   it("reports startup failures without exposing connection secrets", async () => {
+    vi.useFakeTimers();
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: string | URL | Request) => {
@@ -1162,7 +1257,7 @@ describe("SlackEventListener", () => {
       startError = error;
     }
 
-    expect(listener.status().state).toBe("error");
+    expect(listener.status().state).toBe("reconnecting");
     expect(onError).toHaveBeenCalledOnce();
     for (const message of [
       String(startError),
@@ -1172,9 +1267,11 @@ describe("SlackEventListener", () => {
       expect(message).not.toContain(TEST_APP_TOKEN);
       expect(message).not.toContain("wss://");
     }
+    await listener.stop();
   });
 
   it("normalizes an SDK rejection without error details", async () => {
+    vi.useFakeTimers();
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: string | URL | Request) => {
@@ -1197,6 +1294,7 @@ describe("SlackEventListener", () => {
     expect(onError).toHaveBeenCalledWith(
       "Slack Socket Mode: connection failed without error details.",
     );
+    await listener.stop();
   });
 
   it("keeps inbox order stable when name lookups finish out of order", async () => {

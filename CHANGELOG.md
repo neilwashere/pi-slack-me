@@ -44,6 +44,9 @@
   are rejected, and missing credentials or bundles fail with actionable errors.
 - Thread-history classification retries Slack rate limits and transient server
   failures before deciding whether to notify.
+- Socket Mode now recovers from initial connection failures and socket errors
+  even when the SDK omits a disconnect event, and continues reconnecting at a
+  capped 30-second interval until listening is disabled.
 
 ## 1.2.0 — 2026-08-07
 

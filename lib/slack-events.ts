@@ -4,7 +4,7 @@ const MAX_INBOX_MESSAGES = 100;
 const MAX_SEEN_EVENT_IDS = 1_000;
 const INITIAL_RECONNECT_DELAY_MS = 1_000;
 const MAX_RECONNECT_DELAY_MS = 30_000;
-const MAX_RECONNECT_ATTEMPTS = 6;
+const MAX_RECONNECT_BACKOFF_STEP = 5;
 const SOCKET_START_TIMEOUT_MS = 10_000;
 const DISCONNECT_RETRY_DELAY_MS = 1_000;
 const STOP_TIMEOUT_MS = 5_000;
@@ -173,7 +173,7 @@ export class SlackEventListener {
   private selfUserId?: string;
   private desiredRunning = false;
   private lifecycle = 0;
-  private reconnectAttempts = 0;
+  private reconnectBackoffStep = 0;
   private connectionErrorReported = false;
   private reconnectTimer?: ReturnType<typeof setTimeout>;
   private startPromise?: Promise<void>;
@@ -200,7 +200,7 @@ export class SlackEventListener {
     });
     this.socket.on("connected", () => {
       if (!this.desiredRunning) return;
-      this.reconnectAttempts = 0;
+      this.reconnectBackoffStep = 0;
       this.connectionErrorReported = false;
       this.setState("connected");
     });
@@ -237,7 +237,7 @@ export class SlackEventListener {
 
     this.desiredRunning = true;
     this.clearReconnectTimer();
-    this.reconnectAttempts = 0;
+    this.reconnectBackoffStep = 0;
     this.connectionErrorReported = false;
     const lifecycle = ++this.lifecycle;
     this.setState("connecting");
@@ -340,7 +340,12 @@ export class SlackEventListener {
     const clearStartPromise = () => {
       if (this.startPromise === startPromise) this.startPromise = undefined;
     };
-    void startPromise.then(clearStartPromise, clearStartPromise);
+    void startPromise.then(clearStartPromise, () => {
+      clearStartPromise();
+      if (this.desiredRunning && lifecycle === this.lifecycle) {
+        this.scheduleReconnect();
+      }
+    });
     return startPromise;
   }
 
@@ -356,7 +361,7 @@ export class SlackEventListener {
       await this.startSocket();
 
       if (!this.desiredRunning || lifecycle !== this.lifecycle) return;
-      this.reconnectAttempts = 0;
+      this.reconnectBackoffStep = 0;
       this.connectionErrorReported = false;
       this.setState("connected");
     } catch (error) {
@@ -381,7 +386,7 @@ export class SlackEventListener {
     ]);
     const cleanupOutcome = await waitWithTimeout(cleanup, STOP_TIMEOUT_MS);
     if (cleanupOutcome.timedOut) {
-      this.reconnectAttempts = MAX_RECONNECT_ATTEMPTS;
+      this.reconnectBackoffStep = MAX_RECONNECT_BACKOFF_STEP;
     }
     throw new Error("connection timed out.");
   }
@@ -409,39 +414,38 @@ export class SlackEventListener {
   private handleConnectionError(error: unknown): void {
     if (!this.desiredRunning) return;
     this.setState("error");
-    if (this.connectionErrorReported) return;
-    this.connectionErrorReported = true;
-    this.reportError(error);
+    if (!this.connectionErrorReported) {
+      this.connectionErrorReported = true;
+      this.reportError(error);
+    }
+    this.scheduleReconnect();
   }
 
   private scheduleReconnect(): void {
-    if (!this.desiredRunning || this.reconnectTimer || this.startPromise)
-      return;
-    if (this.reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-      this.setState("error");
+    if (!this.desiredRunning) return;
+    if (this.reconnectTimer) {
+      this.setState("reconnecting");
       return;
     }
+    if (this.startPromise) return;
 
     const lifecycle = this.lifecycle;
-    const exponent = Math.min(this.reconnectAttempts, 5);
     const delay = Math.min(
-      INITIAL_RECONNECT_DELAY_MS * 2 ** exponent,
+      INITIAL_RECONNECT_DELAY_MS * 2 ** this.reconnectBackoffStep,
       MAX_RECONNECT_DELAY_MS,
     );
-    this.reconnectAttempts += 1;
+    this.reconnectBackoffStep = Math.min(
+      this.reconnectBackoffStep + 1,
+      MAX_RECONNECT_BACKOFF_STEP,
+    );
     this.setState("reconnecting");
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = undefined;
       if (!this.desiredRunning || lifecycle !== this.lifecycle) return;
 
-      const reconnect = this.beginConnect(lifecycle);
-      void reconnect.then(
+      void this.beginConnect(lifecycle).then(
         () => undefined,
-        () => {
-          if (this.desiredRunning && lifecycle === this.lifecycle) {
-            this.scheduleReconnect();
-          }
-        },
+        () => undefined,
       );
     }, delay);
   }

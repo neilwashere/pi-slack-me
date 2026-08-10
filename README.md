@@ -44,7 +44,7 @@ Each incoming envelope is acknowledged immediately, then filtered locally. The g
 
 It ignores your own posts, bot and system messages, edits, deletes, private channels, DMs, and group DMs. Mentions and participating-thread replies update every pi footer and produce at most one optional Herdr toast containing the author, channel, and a capped one-line preview. Ordinary messages from watched channels update the inbox and footer without a toast.
 
-The footer uses pi's composable extension-status surface, so it persists across renders and coexists with indicators such as pi-lens. Connection loss is retried up to six times with capped exponential backoff, and each connection attempt times out after 10 seconds. After the final failure every footer stays at `Slack: error`; run `/slack listen on` from any pi to try again.
+The footer uses pi's composable extension-status surface, so it persists across renders and coexists with indicators such as pi-lens. While listening remains enabled, initial connection failures, socket errors, and disconnects retry with exponential backoff capped at 30 seconds; each connection attempt times out after 10 seconds. `/slack listen off` cancels pending retries.
 
 The safety boundary is explicit:
 
