@@ -31,6 +31,7 @@ interface TestCommand {
 class SharedInboxState {
   private readonly clients = new Set<FakeInboxClient>();
   private readonly messages: SlackInboxMessage[] = [];
+  private unreadCount = 0;
   private snapshot: GlobalSlackInboxSnapshot = {
     status: { state: "connected", unread: 0 },
   };
@@ -43,18 +44,21 @@ class SharedInboxState {
 
   receive(message: SlackInboxMessage): void {
     this.messages.push(message);
+    this.unreadCount += 1;
     this.publish({
       status: {
         state: "connected",
-        unread: this.snapshot.status.unread + 1,
+        unread: this.unreadCount,
       },
     });
   }
 
   read(limit = 10): SlackInboxMessage[] {
-    const selected = this.messages.slice(-limit);
+    const count = Math.min(limit, this.unreadCount);
+    const selected = this.messages.slice(-count);
+    this.unreadCount = Math.max(0, this.unreadCount - selected.length);
     this.publish({
-      status: { state: "connected", unread: 0 },
+      status: { state: "connected", unread: this.unreadCount },
     });
     return selected;
   }

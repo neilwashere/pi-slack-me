@@ -321,7 +321,8 @@ export class SlackEventListener {
       ? Math.min(MAX_INBOX_MESSAGES, Math.max(0, Math.trunc(limit)))
       : 10;
     if (boundedLimit === 0) return [];
-    const messages = this.inbox.slice(-boundedLimit);
+    const unread = this.inbox.filter((message) => message.unread);
+    const messages = unread.slice(0, boundedLimit);
     for (const message of messages) message.unread = false;
     if (messages.length > 0) this.emitStatus();
     return messages.map(({ unread: _unread, ...message }) => message);

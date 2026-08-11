@@ -48,7 +48,8 @@ class FakeInboxBackend implements SlackInboxBackend {
   }
 
   readInbox(limit = 10): SlackInboxMessage[] {
-    const selected = this.messages.slice(-limit);
+    const unread = this.messages.filter((message) => message.unread);
+    const selected = unread.slice(0, limit);
     for (const message of selected) message.unread = false;
     this.emitStatus();
     return selected.map(({ unread: _unread, ...message }) => message);
@@ -408,7 +409,7 @@ describe("GlobalSlackInbox", () => {
       expect(secondSnapshots.at(-1)?.unread).toBe(0);
     });
 
-    await expect(second.readInbox(10)).resolves.toEqual([message]);
+    await expect(second.readInbox(10)).resolves.toEqual([]);
 
     await second.setListening(false);
     await vi.waitFor(() => {
