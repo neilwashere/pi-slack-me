@@ -515,6 +515,68 @@ describe("SlackEventListener", () => {
     ).toHaveLength(1);
   });
 
+  it("drains unread messages across successive bounded reads", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | Request) => {
+        const url = String(input);
+        if (url.includes("auth.test")) {
+          return slackResponse({ ok: true, user_id: "USELF" });
+        }
+        if (url.includes("users.info")) {
+          return slackResponse({
+            ok: true,
+            user: { id: "UOTHER", profile: { display_name: "Alice" } },
+          });
+        }
+        if (url.includes("conversations.info")) {
+          return slackResponse({
+            ok: true,
+            channel: { id: "C123", name: "engineering" },
+          });
+        }
+        throw new Error(`Unexpected Slack request: ${url}`);
+      }),
+    );
+
+    const socket = new FakeSocketClient();
+    const listener = new SlackEventListener({ socket });
+    await listener.start();
+
+    const makeEvent = (index: number): SocketEvent => {
+      const suffix = String(index).padStart(6, "0");
+      const event = {
+        type: "message" as const,
+        channel: "C123",
+        channel_type: "channel" as const,
+        user: "UOTHER",
+        text: `<@USELF> message ${index}`,
+        ts: `1786020000.${suffix}`,
+      };
+      return {
+        ack: vi.fn().mockResolvedValue(undefined),
+        body: { event_id: `Ev${suffix}`, event },
+        event,
+      };
+    };
+
+    for (let index = 1; index <= 3; index += 1) {
+      socket.emit("message", makeEvent(index));
+    }
+
+    await vi.waitFor(() => expect(listener.status().unread).toBe(3));
+    expect(listener.readInbox(2).map((message) => message.eventId)).toEqual([
+      "Ev000001",
+      "Ev000002",
+    ]);
+    expect(listener.status().unread).toBe(1);
+    expect(listener.readInbox(2).map((message) => message.eventId)).toEqual([
+      "Ev000003",
+    ]);
+    expect(listener.status().unread).toBe(0);
+    expect(listener.readInbox(2)).toEqual([]);
+  });
+
   it("keeps only the latest 100 inbox messages", async () => {
     vi.stubGlobal(
       "fetch",

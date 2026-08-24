@@ -51,7 +51,7 @@ The safety boundary is explicit:
 - Slack message text is treated as **untrusted external content**, never as an instruction;
 - no event calls `sendUserMessage` or starts an agent turn;
 - the global inbox holds at most 100 messages and is never written to a pi session or another file;
-- `/slack inbox [N]` from any pi marks only the displayed messages read globally and places structured JSON in that pi's editor for review;
+- `/slack inbox [N]` from any pi displays and globally marks read up to N oldest unread messages; structured JSON is placed in that pi's editor for review;
 - `/slack inbox clear` removes all retained messages globally;
 - an individual pi reload or exit does not discard the inbox while another client remains connected;
 - sidecar exit discards the inbox because its state is intentionally memory-only.
@@ -206,7 +206,7 @@ Natural-language Slack requests still use the LLM-callable tools. The bundled `s
 | `/slack edit <channel> <ts> <text>` | Review and edit one of your messages |
 | `/slack delete <channel> <ts>` | Confirm and permanently delete one of your messages |
 | `/slack react <channel> <ts> <emoji>` | Add a reaction immediately |
-| `/slack inbox [N]` | Place the latest 1-100 retained messages in the editor without submitting them |
+| `/slack inbox [N]` | Place the next 1-100 unread messages in the editor without submitting them |
 | `/slack inbox clear` | Empty the in-memory inbox |
 | `/slack listen status\|on\|off` | Inspect or control the global Socket Mode connection |
 | `/slack config` | Settings modal (write review gate) |

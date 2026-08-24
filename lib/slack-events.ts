@@ -51,7 +51,7 @@ function socketFailure(error: unknown): Error {
 }
 
 export interface SocketModeClientLike {
-  on(event: string, listener: (payload: unknown) => void): unknown;
+  on(event: string, listener: (payload: unknown) => void): void;
   start(): Promise<unknown>;
   disconnect(): Promise<void>;
 }
