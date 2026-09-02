@@ -1,11 +1,8 @@
-import { SlackApiError } from "./api";
 import type { SlackThreadTracker } from "./slack-events";
+import { slackGetWithRetry } from "./slack-retry";
 import type { SlackTransport } from "./slack-transport";
 
 const MAX_CACHED_THREADS = 1_000;
-const MAX_PAGE_ATTEMPTS = 3;
-const DEFAULT_RETRY_DELAY_MS = 1_000;
-const MAX_RETRY_DELAY_MS = 30_000;
 
 interface ThreadRepliesResponse {
   ok: boolean;
@@ -80,29 +77,14 @@ class CachedSlackThreadTracker implements SlackThreadTracker {
     }
   }
 
-  private async getRepliesPage(
+  private getRepliesPage(
     query: Record<string, string | number | undefined>,
   ): Promise<ThreadRepliesResponse> {
-    for (let attempt = 0; attempt < MAX_PAGE_ATTEMPTS; attempt += 1) {
-      try {
-        return await this.transport.get<ThreadRepliesResponse>(
-          "conversations.replies",
-          { query },
-        );
-      } catch (error) {
-        const retryable =
-          error instanceof SlackApiError &&
-          (error.isRateLimited || error.status >= 500);
-        if (!retryable || attempt === MAX_PAGE_ATTEMPTS - 1) throw error;
-        const retryDelay = Math.min(
-          Math.max(0, error.retryAfter ?? DEFAULT_RETRY_DELAY_MS / 1_000) *
-            1_000,
-          MAX_RETRY_DELAY_MS,
-        );
-        await new Promise<void>((resolve) => setTimeout(resolve, retryDelay));
-      }
-    }
-    throw new Error("Slack thread history retry limit was exhausted.");
+    return slackGetWithRetry(
+      this.transport,
+      "conversations.replies",
+      query,
+    );
   }
 
   private threadKey(channel: string, threadTimestamp: string): string {

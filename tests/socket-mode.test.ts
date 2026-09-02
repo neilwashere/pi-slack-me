@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SlackEventListener } from "../lib/slack-events";
 
@@ -10,7 +13,7 @@ interface SocketEvent {
     event: {
       type: "message";
       channel: string;
-      channel_type: "channel";
+      channel_type: "channel" | "group" | "im" | "mpim";
       user: string;
       text: string;
       ts: string;
@@ -49,16 +52,69 @@ function slackResponse(body: Record<string, unknown>): Response {
   });
 }
 
+function stubDirectoryFetch(): void {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.includes("auth.test")) {
+        return slackResponse({ ok: true, user_id: "USELF" });
+      }
+      if (url.includes("users.info")) {
+        return slackResponse({
+          ok: true,
+          user: { id: "UOTHER", profile: { display_name: "Alice" } },
+        });
+      }
+      if (url.includes("conversations.info")) {
+        return slackResponse({
+          ok: true,
+          channel: { id: "C123", name: "engineering" },
+        });
+      }
+      throw new Error(`Unexpected Slack request: ${url}`);
+    }),
+  );
+}
+
+function mentionEvent(eventId: string, ts: string): SocketEvent {
+  const event: SocketEvent = {
+    ack: vi.fn().mockResolvedValue(undefined),
+    body: {
+      event_id: eventId,
+      event: {
+        type: "message",
+        channel: "C123",
+        channel_type: "channel",
+        user: "UOTHER",
+        text: "Can you review this, <@USELF>?",
+        ts,
+      },
+    },
+    event: undefined as never,
+  };
+  event.event = event.body.event;
+  return event;
+}
+
 describe("SlackEventListener", () => {
+  // Each listener persists its inbox, so without a per-test store path every
+  // test inherits the previous one's retained messages and dedupe keys.
+  let storeDirectory: string;
+
   beforeEach(() => {
     vi.resetModules();
     process.env.SLACK_USER_TOKEN = "xoxp-test";
+    storeDirectory = mkdtempSync(join(tmpdir(), "pi-slack-inbox-"));
+    process.env.PI_SLACK_INBOX_STORE = join(storeDirectory, "inbox.json");
   });
 
   afterEach(() => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
     delete process.env.SLACK_USER_TOKEN;
+    delete process.env.PI_SLACK_INBOX_STORE;
+    rmSync(storeDirectory, { recursive: true, force: true });
   });
 
   it("acknowledges a mention and makes it available in the inbox", async () => {
@@ -390,11 +446,7 @@ describe("SlackEventListener", () => {
     socket.emit("message", reply);
 
     await vi.waitFor(() => expect(listener.status().unread).toBe(1));
-    expect(threadTracker.participates).toHaveBeenCalledWith(
-      "C123",
-      "1786020000.000460",
-      "USELF",
-    );
+    expect(threadTracker.participates).not.toHaveBeenCalled();
     expect(listener.readInbox(1)).toEqual([
       expect.objectContaining({
         eventId: "EvThreadReply",
@@ -577,7 +629,7 @@ describe("SlackEventListener", () => {
     expect(listener.readInbox(2)).toEqual([]);
   });
 
-  it("keeps only the latest 100 inbox messages", async () => {
+  it("limits a human inbox read to 100 without evicting pending work", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: string | URL | Request) => {
@@ -629,11 +681,13 @@ describe("SlackEventListener", () => {
     }
     await new Promise((resolve) => setTimeout(resolve, 10));
 
-    expect(listener.status().unread).toBe(100);
+    expect(listener.status().unread).toBe(101);
     const messages = listener.readInbox(100);
     expect(messages).toHaveLength(100);
-    expect(messages[0]?.eventId).toBe("Ev000002");
-    expect(messages.at(-1)?.eventId).toBe("Ev000101");
+    expect(messages[0]?.eventId).toBe("Ev000001");
+    expect(messages.at(-1)?.eventId).toBe("Ev000100");
+    expect(listener.status().unread).toBe(1);
+    expect(listener.readInbox(100)[0]?.eventId).toBe("Ev000101");
   });
 
   it("marks displayed messages read and clears retained messages", async () => {
@@ -1423,5 +1477,93 @@ describe("SlackEventListener", () => {
       "EvFirst",
       "EvSecond",
     ]);
+  });
+
+  it("captures a private-channel mention", async () => {
+    stubDirectoryFetch();
+    const socket = new FakeSocketClient();
+    const listener = new SlackEventListener({ socket });
+    await listener.start();
+    const event = mentionEvent("EvPrivate", "1786020000.000100");
+    event.body.event.channel_type = "group";
+    event.event = event.body.event;
+
+    socket.emit("message", event);
+
+    await vi.waitFor(() => expect(listener.status().unread).toBe(1));
+    expect(listener.pullInbox({ leaseMs: 0 })[0]).toMatchObject({
+      channelType: "group",
+      attentionKind: "mention",
+    });
+  });
+
+  it("captures an IM without requiring an explicit mention", async () => {
+    stubDirectoryFetch();
+    const socket = new FakeSocketClient();
+    const listener = new SlackEventListener({ socket });
+    await listener.start();
+    const event = mentionEvent("EvDirect", "1786020000.000100");
+    event.body.event.channel = "D123";
+    event.body.event.channel_type = "im";
+    event.body.event.text = "Can you look at this?";
+    event.event = event.body.event;
+
+    socket.emit("message", event);
+
+    await vi.waitFor(() => expect(listener.status().unread).toBe(1));
+    expect(listener.pullInbox({ leaseMs: 0 })[0]).toMatchObject({
+      channelId: "D123",
+      channelType: "im",
+      isMention: false,
+      attentionKind: "direct-message",
+    });
+  });
+
+  it("admits a redelivered message only once when its event id changes", async () => {
+    stubDirectoryFetch();
+    const socket = new FakeSocketClient();
+    const listener = new SlackEventListener({ socket });
+    await listener.start();
+
+    socket.emit("message", mentionEvent("EvFirst", "1786020000.000100"));
+    await vi.waitFor(() => expect(listener.status().unread).toBe(1));
+    socket.emit("message", mentionEvent("EvSecond", "1786020000.000100"));
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(listener.status().unread).toBe(1);
+    expect(listener.pullInbox()).toHaveLength(1);
+  });
+
+  it("redelivers a pulled message that was never acked", async () => {
+    stubDirectoryFetch();
+    const socket = new FakeSocketClient();
+    const listener = new SlackEventListener({ socket });
+    await listener.start();
+    socket.emit("message", mentionEvent("EvFirst", "1786020000.000100"));
+    await vi.waitFor(() => expect(listener.status().unread).toBe(1));
+
+    const [pulled] = listener.pullInbox({ leaseMs: 0 });
+    expect(pulled?.key).toBe("C123:1786020000.000100");
+    expect(listener.pullInbox({ leaseMs: 0 })).toHaveLength(1);
+
+    expect(listener.ackInbox([pulled?.key ?? ""])).toBe(1);
+    expect(listener.pullInbox({ leaseMs: 0 })).toEqual([]);
+  });
+
+  it("recovers unacked messages in a listener built after a restart", async () => {
+    stubDirectoryFetch();
+    const socket = new FakeSocketClient();
+    const listener = new SlackEventListener({ socket });
+    await listener.start();
+    socket.emit("message", mentionEvent("EvFirst", "1786020000.000100"));
+    await vi.waitFor(() => expect(listener.status().unread).toBe(1));
+    listener.pullInbox({ leaseMs: 0 });
+    await listener.stop();
+
+    const restarted = new SlackEventListener({ socket: new FakeSocketClient() });
+    const recovered = restarted.pullInbox({ leaseMs: 0 });
+    expect(recovered).toHaveLength(1);
+    expect(recovered[0]?.key).toBe("C123:1786020000.000100");
+    expect(recovered[0]?.deliveryCount).toBe(2);
   });
 });

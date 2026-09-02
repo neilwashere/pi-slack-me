@@ -44,6 +44,14 @@ export const ALLOW_HEADLESS_WRITE_FLAG = "slack-allow-headless-write";
 export const ALLOW_HEADLESS_WRITE_FLAG_DESCRIPTION =
   "When on (default off), slack_post_message / slack_update_message MAY run in headless mode (no interactive UI) without a human review. Off by default: unsupervised writes are refused until a human is present at the UI. Destructive deletes are ALWAYS blocked in headless mode regardless. Toggle via /slack config or /slack headless on|off.";
 
+/**
+ * Environment variable that waives the review gate for THIS PROCESS ONLY.
+ * Unlike the two flags above it touches no shared file, so an unattended agent
+ * can post while an interactive pi in the same account keeps its review dialog.
+ * It never applies to destructive writes: deletes stay guarded.
+ */
+export const AUTONOMOUS_ENV_VAR = "SLACK_AUTONOMOUS";
+
 const SETTINGS_FILENAME = "pi-slack-me.json";
 const DEFAULT_CONFIRM_WRITE = true;
 
@@ -92,6 +100,12 @@ function writeSettings(patch: Partial<SettingsFile>): boolean {
   } catch {
     return false;
   }
+}
+
+/** Whether this process was started with the per-process review waiver set. */
+export function isAutonomousProcess(): boolean {
+  const value = process.env[AUTONOMOUS_ENV_VAR]?.trim().toLowerCase();
+  return value === "1" || value === "true" || value === "yes";
 }
 
 /** Current live value of the review gate (read from disk each call). */
@@ -156,7 +170,11 @@ export interface ConfirmOutcome {
  * Resolve whether a write should proceed, prompting the user when the gate is
  * active and an interactive UI is present. Pure orchestration: no Slack I/O.
  *
- * Two independent gates, evaluated in order:
+ * Three independent gates, evaluated in order:
+ *   0. AUTONOMOUS waiver — SLACK_AUTONOMOUS in this process's environment lets
+ *      non-destructive writes through with no review and no UI, without
+ *      changing behavior for any other pi process. Destructive (forced) writes
+ *      ignore it.
  *   1. HEADLESS guard — without an interactive UI, writes are blocked unless
  *      slack-allow-headless-write is on. Destructive (forced) writes are ALWAYS
  *      blocked headless, no opt-in. This guard is independent of the review
@@ -170,6 +188,12 @@ export async function confirmWrite(
   opts: ConfirmWriteOptions,
 ): Promise<ConfirmOutcome> {
   const forced = opts.requireInteractive === true;
+
+  // 0. AUTONOMOUS WAIVER. Scoped to this process's environment, so it cannot
+  //    silently disarm an interactive session elsewhere.
+  if (!forced && isAutonomousProcess()) {
+    return { proceed: true, text: opts.editableText };
+  }
 
   // 1. HEADLESS GUARD (independent of the review flag). Applies to every write
   //    before any review logic.

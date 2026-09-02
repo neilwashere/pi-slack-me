@@ -4,7 +4,12 @@ import { access } from "node:fs/promises";
 import { createConnection, type Socket } from "node:net";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { SlackCatchUpResult } from "./slack-catch-up";
 import type { SlackInboxMessage, SlackListenerStatus } from "./slack-events";
+import type {
+  SlackInboxPullFilter,
+  SlackInboxPullItem,
+} from "./slack-inbox-store";
 import {
   SLACK_SIDECAR_PROTOCOL_VERSION,
   type GlobalSlackInboxSnapshot,
@@ -23,6 +28,9 @@ export interface GlobalSlackInbox {
   status(): Promise<SlackListenerStatus>;
   setListening(enabled: boolean): Promise<SlackListenerStatus>;
   readInbox(limit?: number): Promise<SlackInboxMessage[]>;
+  pullInbox(filter?: SlackInboxPullFilter): Promise<SlackInboxPullItem[]>;
+  ackInbox(keys: readonly string[]): Promise<number>;
+  catchUp(): Promise<SlackCatchUpResult>;
   clearInbox(): Promise<number>;
   close(): Promise<void>;
 }
@@ -100,6 +108,18 @@ class UnixGlobalSlackInbox implements GlobalSlackInbox {
 
   readInbox(limit?: number): Promise<SlackInboxMessage[]> {
     return this.request({ type: "read-inbox", limit });
+  }
+
+  pullInbox(filter?: SlackInboxPullFilter): Promise<SlackInboxPullItem[]> {
+    return this.request({ type: "pull-inbox", filter });
+  }
+
+  ackInbox(keys: readonly string[]): Promise<number> {
+    return this.request({ type: "ack-inbox", keys: [...keys] });
+  }
+
+  catchUp(): Promise<SlackCatchUpResult> {
+    return this.request({ type: "catch-up" });
   }
 
   clearInbox(): Promise<number> {

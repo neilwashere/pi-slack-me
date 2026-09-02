@@ -1,5 +1,7 @@
-import { SlackEventListener } from "./slack-events";
+import { SlackCatchUp } from "./slack-catch-up";
+import { SlackEventListener, type SlackListenerState } from "./slack-events";
 import { parseWatchedChannels } from "./slack-inbox";
+import { SlackInboxStore } from "./slack-inbox-store";
 import { createSlackSocketClient } from "./slack-socket-client";
 import { createSlackDirectory } from "./slack-directory";
 import { createSlackThreadTracker } from "./slack-thread-tracker";
@@ -23,22 +25,61 @@ export function createSlackInboxBackend(
   const emit = (event: SlackInboxBackendEvent) => {
     for (const listener of listeners) listener(event);
   };
+  const watchedChannels =
+    options.watchedChannels ??
+    parseWatchedChannels(process.env.SLACK_LISTEN_CHANNELS);
+  const store = new SlackInboxStore();
+  let previousState: SlackListenerState = "stopped";
+  let catchUp: SlackCatchUp;
   const eventListener = new SlackEventListener({
     socket: createSlackSocketClient(options.appToken),
+    store,
     directory,
     threadTracker: createSlackThreadTracker(transport),
-    watchedChannels:
-      options.watchedChannels ??
-      parseWatchedChannels(process.env.SLACK_LISTEN_CHANNELS),
-    onStatusChange: (status) => emit({ type: "status", status }),
+    watchedChannels,
+    onStatusChange: (status) => {
+      emit({ type: "status", status });
+      const justConnected =
+        status.state === "connected" && previousState !== "connected";
+      previousState = status.state;
+      if (justConnected) void runCatchUp();
+    },
     onAttention: (message) => emit({ type: "attention", message }),
   });
+  catchUp = new SlackCatchUp({
+    transport,
+    store,
+    watchedChannels,
+    ingest: (message) => eventListener.ingestBackfill(message),
+    isAvailable: () => eventListener.canIngestBackfill(),
+  });
+  const runCatchUp = async () => {
+    if (!eventListener.canIngestBackfill()) {
+      throw new Error(
+        "Slack catch-up requires a started listener with an authenticated user.",
+      );
+    }
+    const result = await catchUp.run();
+    if (result.truncated || result.errors.length > 0) {
+      eventListener.reportExternalError(
+        new Error(
+          `catch-up incomplete (${result.errors.length} error(s), truncated=${String(result.truncated)}).`,
+        ),
+      );
+    } else {
+      eventListener.clearExternalError();
+    }
+    return result;
+  };
 
   return {
     start: () => eventListener.start(),
     stop: () => eventListener.stop(),
     status: () => eventListener.status(),
     readInbox: (limit) => eventListener.readInbox(limit),
+    pullInbox: (filter) => eventListener.pullInbox(filter),
+    ackInbox: (keys) => eventListener.ackInbox(keys),
+    catchUp: runCatchUp,
     clearInbox: () => eventListener.clearInbox(),
     subscribe(listener) {
       listeners.add(listener);

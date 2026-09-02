@@ -18,6 +18,8 @@ import {
   getConfirmWriteEnabled,
   getAllowHeadlessWriteEnabled,
   getSettingsPath,
+  isAutonomousProcess,
+  AUTONOMOUS_ENV_VAR,
   CONFIRM_WRITE_FLAG,
   ALLOW_HEADLESS_WRITE_FLAG,
   type ConfirmContext,
@@ -35,6 +37,7 @@ beforeEach(() => {
 
 afterEach(() => {
   delete process.env.PI_CODING_AGENT_DIR;
+  delete process.env[AUTONOMOUS_ENV_VAR];
   rmSync(tmpDir, { recursive: true, force: true });
 });
 
@@ -55,6 +58,76 @@ function mockCtx(opts: {
   };
   return { ctx, editor, confirm };
 }
+
+describe("autonomous waiver", () => {
+  it("recognizes the documented truthy spellings only", () => {
+    for (const value of ["1", "true", "TRUE", " yes "]) {
+      process.env[AUTONOMOUS_ENV_VAR] = value;
+      expect(isAutonomousProcess()).toBe(true);
+    }
+    for (const value of ["0", "false", "", "on"]) {
+      process.env[AUTONOMOUS_ENV_VAR] = value;
+      expect(isAutonomousProcess()).toBe(false);
+    }
+  });
+
+  it("posts without review even with a UI present and review enabled", async () => {
+    process.env[AUTONOMOUS_ENV_VAR] = "1";
+    const { ctx, editor, confirm } = mockCtx({ editorResult: "edited" });
+
+    const out = await confirmWrite(ctx, {
+      title: "Post",
+      editableText: "drafted",
+      summary: "s",
+    });
+
+    expect(out).toEqual({ proceed: true, text: "drafted" });
+    expect(editor).not.toHaveBeenCalled();
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
+  it("posts headless without the headless opt-in", async () => {
+    process.env[AUTONOMOUS_ENV_VAR] = "1";
+    setAllowHeadlessWriteEnabled(false);
+    const { ctx } = mockCtx({ hasUI: false });
+
+    const out = await confirmWrite(ctx, {
+      title: "Post",
+      editableText: "drafted",
+      summary: "s",
+    });
+
+    expect(out).toEqual({ proceed: true, text: "drafted" });
+  });
+
+  it("still confirms a destructive write with a UI present", async () => {
+    process.env[AUTONOMOUS_ENV_VAR] = "1";
+    const { ctx, confirm } = mockCtx({ confirmResult: false });
+
+    const out = await confirmWrite(ctx, {
+      title: "Delete",
+      summary: "s",
+      requireInteractive: true,
+    });
+
+    expect(out.proceed).toBe(false);
+    expect(confirm).toHaveBeenCalledOnce();
+  });
+
+  it("still refuses a destructive write with no UI", async () => {
+    process.env[AUTONOMOUS_ENV_VAR] = "1";
+    const { ctx, confirm } = mockCtx({ hasUI: false, confirmResult: true });
+
+    const out = await confirmWrite(ctx, {
+      title: "Delete",
+      summary: "s",
+      requireInteractive: true,
+    });
+
+    expect(out.proceed).toBe(false);
+    expect(confirm).not.toHaveBeenCalled();
+  });
+});
 
 describe("confirmWrite gate", () => {
   it("review disabled WITH a UI -> proceeds without touching UI (fast path)", async () => {

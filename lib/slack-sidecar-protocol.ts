@@ -1,6 +1,7 @@
 import type { SlackListenerStatus } from "./slack-events";
+import type { SlackInboxPullFilter } from "./slack-inbox-store";
 
-export const SLACK_SIDECAR_PROTOCOL_VERSION = 1;
+export const SLACK_SIDECAR_PROTOCOL_VERSION = 2;
 
 export interface SlackInboxClientIdentity {
   processId: number;
@@ -24,6 +25,9 @@ export type SlackSidecarRequest =
   | { id: string; type: "status" }
   | { id: string; type: "set-listening"; enabled: boolean }
   | { id: string; type: "read-inbox"; limit?: number }
+  | { id: string; type: "pull-inbox"; filter?: SlackInboxPullFilter }
+  | { id: string; type: "ack-inbox"; keys: string[] }
+  | { id: string; type: "catch-up" }
   | { id: string; type: "clear-inbox" };
 
 export type SlackSidecarRequestInput = SlackSidecarRequest extends infer Request

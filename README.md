@@ -4,11 +4,11 @@ Maintained at [neilwashere/pi-slack-me](https://github.com/neilwashere/pi-slack-
 
 Slack tools for [pi](https://github.com/earendil-works/pi-coding-agent) that act as **you**, not as a bot.
 
-The extension adds 9 LLM-callable tools that read and write Slack using a **user token** (`xoxp-`). There is no bot to invite into channels and no visible footprint in the workspace: the Slack app inherits *your* membership and access, so the agent sees (and posts as) exactly what you do - public channels, private channels you're in, your DMs, and group DMs.
+The extension adds 12 LLM-callable tools that read and write Slack using a **user token** (`xoxp-`). There is no bot to invite into channels and no visible footprint in the workspace: the Slack app inherits *your* membership and access, so the agent sees (and posts as) exactly what you do - public channels, private channels you're in, your DMs, and group DMs.
 
 Use it when you want an agent to **consume information** from Slack (read feedback, follow issues, search past decisions, pull a thread into a coding session), **post on your behalf** (send a message, reply in a thread, DM someone, edit or delete your own messages), or add reactions. Message writes open in a review dialog before they touch Slack; reactions are applied immediately when the reaction tool runs.
 
-An optional [Socket Mode](https://docs.slack.dev/apis/events-api/using-socket-mode) sidecar receives public-channel messages in real time. It is deliberately passive: incoming Slack text never triggers an LLM turn automatically. One on-demand sidecar owns the connection and a bounded global in-memory inbox; every running pi displays the same unread count and can open the inbox with `/slack inbox`.
+An optional [Socket Mode](https://docs.slack.dev/apis/events-api/using-socket-mode) sidecar receives public-channel, private-channel, DM, and group-DM messages in real time. It is deliberately passive: incoming Slack text never triggers an LLM turn automatically. One on-demand sidecar owns the connection and a bounded durable inbox; every running pi displays the same unread count and can open the inbox with `/slack inbox`.
 
 ## Why a user token (and not a bot)
 
@@ -29,6 +29,9 @@ The tradeoff, per Slack's docs: the app shows an OAuth consent screen the first 
 | `slack_update_message` | Edit the text of a message you previously posted (`chat.update`) |
 | `slack_delete_message` | Permanently delete one of your messages; always confirmed (`chat.delete`) |
 | `slack_add_reaction` | Add an emoji reaction as you (`reactions.add`) |
+| `slack_read_inbox` | Take a leased batch of captured mentions, thread replies, and watched-channel messages |
+| `slack_ack_inbox` | Complete inbox messages by key so they are not handed out again |
+| `slack_catch_up` | Reconcile the bounded delta Slack sent while Socket Mode was offline |
 
 User IDs are resolved to display names (cached), so feedback reads as `**Esteban**: ...` rather than `**U12345**: ...`.
 
@@ -38,11 +41,12 @@ Setting `SLACK_APP_TOKEN` enables one on-demand sidecar through Slack's official
 
 Each incoming envelope is acknowledged immediately, then filtered locally. The global inbox retains:
 
-- normal public-channel messages that mention your authenticated Slack user;
+- public- or private-channel messages that mention your authenticated Slack user;
 - replies by other people in a thread where you previously posted or were mentioned;
+- all ordinary IM and group-DM messages;
 - normal messages from channel IDs listed in `SLACK_LISTEN_CHANNELS`.
 
-It ignores your own posts, bot and system messages, edits, deletes, private channels, DMs, and group DMs. Mentions and participating-thread replies update every pi footer and produce at most one optional Herdr toast containing the author, channel, and a capped one-line preview. Ordinary messages from watched channels update the inbox and footer without a toast.
+It ignores your own posts, bot and system messages, edits, and deletes. Mentions, direct messages, and participating-thread replies update every pi footer and produce at most one optional Herdr toast containing the author, channel, and a capped one-line preview. Ordinary messages from watched channels update the inbox and footer without a toast.
 
 The footer uses pi's composable extension-status surface, so it persists across renders and coexists with indicators such as pi-lens. While listening remains enabled, initial connection failures, socket errors, and disconnects retry with exponential backoff capped at 30 seconds; each connection attempt times out after 10 seconds. `/slack listen off` cancels pending retries.
 
@@ -50,11 +54,11 @@ The safety boundary is explicit:
 
 - Slack message text is treated as **untrusted external content**, never as an instruction;
 - no event calls `sendUserMessage` or starts an agent turn;
-- the global inbox holds at most 100 messages and is never written to a pi session or another file;
+- the durable inbox holds at most 1,000 unacked messages in a credential-isolated `0600` file and is never written to a pi session;
 - `/slack inbox [N]` from any pi displays and globally marks read up to N oldest unread messages; structured JSON is placed in that pi's editor for review;
 - `/slack inbox clear` removes all retained messages globally;
 - an individual pi reload or exit does not discard the inbox while another client remains connected;
-- sidecar exit discards the inbox because its state is intentionally memory-only.
+- the inbox is persisted, so a sidecar restart replays messages no agent has acked.
 
 When pi runs inside Herdr, the sidecar uses the local Herdr socket advertised by the pi integration. Herdr remains optional: without it, footer fan-out and the global inbox still work, but there is no foreground toast. To enable Herdr's in-app toast surface:
 
@@ -64,6 +68,47 @@ delivery = "herdr"
 ```
 
 `SLACK_LISTEN_CHANNELS` accepts comma- or whitespace-separated channel IDs. Leave it unset for mention-and-thread-only behavior. Use `slack_list_channels` or `/slack channels` to find IDs.
+
+## Unattended agents
+
+An agent that works Slack on its own needs two things the interactive path does not: writes that do not wait for a human, and reads it cannot silently lose.
+
+### Per-process write waiver
+
+`SLACK_AUTONOMOUS=1` in an agent's environment lets `slack_post_message` and `slack_update_message` through with no review dialog and no headless opt-in. It is scoped to that process, so an interactive pi under the same account keeps its review dialog. Deletes ignore it and stay guarded.
+
+```bash
+SLACK_AUTONOMOUS=1 pi
+```
+
+### Lease and ack
+
+`slack_read_inbox` does not consume a message; it **leases** one. The message is hidden from other reads for `lease_seconds` (default 300), then handed back with a higher `delivery_count` unless `slack_ack_inbox` completed it. An agent that dies mid-task therefore replays the message instead of dropping it.
+
+Each message carries `key` (for the ack) and `reply_thread_ts` (the thread to reply in — the parent's `thread_ts`, or the message's own `ts` when it is top-level). A typical loop:
+
+1. `slack_read_inbox` with `from_users` and a lease longer than the work;
+2. `slack_add_reaction` to signal pickup;
+3. do the work, `slack_post_message` with `thread_ts` set to `reply_thread_ts`;
+4. `slack_ack_inbox` with the key.
+
+A long-running task can reply to the same thread repeatedly by keeping `reply_thread_ts`, and should ack only once the whole task is finished.
+
+Retention lives at `~/.pi/agent/pi-slack-me-inbox-<identity-hash>.json` (override with `PI_SLACK_INBOX_STORE`), holds at most 1,000 unacked messages, and is written `0600`. For standard `xoxp-` tokens the hash uses the stable workspace/user segments, so app-token and user-token rotation keep the same inbox without exposing token material. Exactly one sidecar owns the file; there is no file locking, so do not point two writers at one override path. Messages are deduplicated on channel and timestamp, and the last 1,000 keys are remembered after completion, so an acked message is not admitted twice.
+
+Text retained here is still untrusted external content. The batch says so on every read, and no incoming message ever starts an agent turn by itself — the agent must ask for the batch.
+
+### Offline catch-up
+
+Socket Mode does not replay events sent while its connection was down. The sidecar therefore runs a bounded Web API reconciliation after each connection and `slack_catch_up` lets an agent await the same pass explicitly at startup. It checks:
+
+- workspace mentions since the durable mention watermark (`search.messages`, requiring `search:read`);
+- all accessible DMs and group DMs discovered through `users.conversations`, plus known conversations and `SLACK_LISTEN_CHANNELS` (`conversations.history`);
+- threads where you posted or were mentioned (`conversations.replies`).
+
+Each scope starts no earlier than 24 hours before the pass, reads at most five pages of 100 messages, and the whole pass admits at most 200 messages. Live and recovered messages share the `channel_id:timestamp` dedupe key. When newest-first conversation history reaches a bound, a durable backward boundary lets the next call continue into older pages instead of repeating the same page window. The result reports `truncated` and per-scope `errors`; either means the delta was not proven complete. Without `search:read`, known conversations and threads still reconcile, but mentions in previously unknown channels cannot be recovered. Discovering DMs requires `im:read` and `mpim:read`; missing scopes appear in `errors` rather than suppressing other recovery scopes.
+
+An autonomous startup should call `slack_catch_up`, inspect `errors` and `truncated`, then call `slack_read_inbox`.
 
 ## Write tools & review
 
@@ -75,6 +120,8 @@ Before any message write reaches Slack, the extension shows it for review:
 - **delete** asks **yes/no** - it is irreversible, so it is *always* confirmed even when the review flag is off, and it is **refused in headless mode** rather than running blind.
 
 The editable review is on by default and is governed by the `slack-confirm-write` flag. `slack_add_reaction` is not covered by this message-review gate; it applies the requested reaction immediately.
+
+`SLACK_AUTONOMOUS` waives both the review and the headless refusal for the process that sets it, without changing either persisted flag. Deletes are unaffected.
 
 **Headless mode** (no interactive UI, e.g. an unsupervised/automated run): post and update are **refused by default** - the extension will not post on your behalf without a human present. Opt in with the `slack-allow-headless-write` flag if you genuinely want unsupervised writes (e.g. scheduled/automation use). Delete is *always* blocked in headless mode, no opt-in.
 
@@ -151,13 +198,13 @@ export SLACK_USER_TOKEN=xoxp-...
 Socket Mode needs a separate **app-level token** (`xapp-`), not another user scope:
 
 1. Open your app at [api.slack.com/apps](https://api.slack.com/apps) → **Socket Mode** and enable it.
-2. Open **Event Subscriptions**, enable events, and under **Subscribe to events on behalf of users** add `message.channels`. This event uses the existing `channels:history` user scope.
+2. Open **Event Subscriptions**, enable events, and under **Subscribe to events on behalf of users** add the event types you need: `message.channels`, `message.groups`, `message.im`, and `message.mpim`. Each event needs its matching history scope (`channels:history`, `groups:history`, `im:history`, or `mpim:history`).
 3. Open **Basic Information** → **App-Level Tokens** → **Generate Token and Scopes**. Give the token a name and add `connections:write`.
 4. Copy the generated `xapp-` token and export it before starting pi:
 
 ```bash
 export SLACK_APP_TOKEN=xapp-...
-# Optional: retain every normal message from selected public channels.
+# Optional: retain every normal message from selected conversations.
 export SLACK_LISTEN_CHANNELS=C0123ABC456,C0987XYZ654
 ```
 
@@ -169,9 +216,12 @@ settings:
   event_subscriptions:
     user_events:
       - message.channels
+      - message.groups
+      - message.im
+      - message.mpim
 ```
 
-`SLACK_APP_TOKEN` is the opt-in switch. Without it, the nine Slack tools behave exactly as before and no socket is opened. Restart pi after adding or replacing the token.
+`SLACK_APP_TOKEN` is the opt-in switch. Without it, the Web API tools behave exactly as before and no socket is opened. Restart pi after adding or replacing the token.
 
 ### 6. Done
 
@@ -207,7 +257,7 @@ Natural-language Slack requests still use the LLM-callable tools. The bundled `s
 | `/slack delete <channel> <ts>` | Confirm and permanently delete one of your messages |
 | `/slack react <channel> <ts> <emoji>` | Add a reaction immediately |
 | `/slack inbox [N]` | Place the next 1-100 unread messages in the editor without submitting them |
-| `/slack inbox clear` | Empty the in-memory inbox |
+| `/slack inbox clear` | Empty the durable inbox |
 | `/slack listen status\|on\|off` | Inspect or control the global Socket Mode connection |
 | `/slack config` | Settings modal (write review gate) |
 | `/slack confirm on\|off` | Toggle write review (delete stays guarded) |

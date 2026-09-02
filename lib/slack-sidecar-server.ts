@@ -1,7 +1,12 @@
 import { chmod, lstat, mkdir, unlink } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { createServer, type Server, type Socket } from "node:net";
+import type { SlackCatchUpResult } from "./slack-catch-up";
 import type { SlackInboxMessage, SlackListenerStatus } from "./slack-events";
+import type {
+  SlackInboxPullFilter,
+  SlackInboxPullItem,
+} from "./slack-inbox-store";
 import {
   SLACK_SIDECAR_PROTOCOL_VERSION,
   type GlobalSlackInboxSnapshot,
@@ -58,6 +63,65 @@ function normalizedInboxLimit(limit: unknown): number | undefined {
   return Math.min(100, Math.max(0, Math.trunc(limit)));
 }
 
+function normalizedStringList(
+  value: unknown,
+  label: string,
+): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string")) {
+    throw new Error(`Slack inbox ${label} must be an array of strings.`);
+  }
+  return value as string[];
+}
+
+function normalizedPullFilter(
+  filter: SlackInboxPullFilter | undefined,
+): SlackInboxPullFilter | undefined {
+  if (filter === undefined) return undefined;
+  if (typeof filter !== "object" || filter === null || Array.isArray(filter)) {
+    throw new Error("Slack inbox pull filter must be an object.");
+  }
+  if (
+    filter.leaseMs !== undefined &&
+    (typeof filter.leaseMs !== "number" ||
+      !Number.isFinite(filter.leaseMs) ||
+      filter.leaseMs < 1_000 ||
+      filter.leaseMs > 86_400_000)
+  ) {
+    throw new Error(
+      "Slack inbox leaseMs must be between 1000 and 86400000 milliseconds.",
+    );
+  }
+  const attentionKinds = normalizedStringList(
+    filter.attentionKinds,
+    "attentionKinds",
+  );
+  for (const kind of attentionKinds ?? []) {
+    if (
+      kind !== "mention" &&
+      kind !== "thread-reply" &&
+      kind !== "direct-message"
+    ) {
+      throw new Error(
+        'Slack inbox attentionKinds accepts only "mention", "thread-reply", and "direct-message".',
+      );
+    }
+  }
+  return {
+    limit: normalizedInboxLimit(filter.limit),
+    fromUsers: normalizedStringList(filter.fromUsers, "fromUsers"),
+    channelIds: normalizedStringList(filter.channelIds, "channelIds"),
+    attentionKinds: attentionKinds as SlackInboxPullFilter["attentionKinds"],
+    leaseMs: filter.leaseMs,
+  };
+}
+
+function normalizedAckKeys(keys: unknown): string[] {
+  const normalized = normalizedStringList(keys, "ack keys");
+  if (!normalized) throw new Error("Slack inbox ack requires keys.");
+  return normalized;
+}
+
 export type SlackInboxBackendEvent =
   | { type: "status"; status: SlackListenerStatus }
   | { type: "attention"; message: SlackInboxMessage };
@@ -67,6 +131,9 @@ export interface SlackInboxBackend {
   stop(): Promise<void>;
   status(): SlackListenerStatus;
   readInbox(limit?: number): SlackInboxMessage[];
+  pullInbox(filter?: SlackInboxPullFilter): SlackInboxPullItem[];
+  ackInbox(keys: readonly string[]): number;
+  catchUp(): Promise<SlackCatchUpResult>;
   clearInbox(): number;
   subscribe(listener: (event: SlackInboxBackendEvent) => void): () => void;
 }
@@ -235,6 +302,14 @@ export class SlackSidecarServer {
         const limit = normalizedInboxLimit(request.limit);
         return limit === 0 ? [] : this.options.backend.readInbox(limit);
       }
+      case "pull-inbox":
+        return this.options.backend.pullInbox(
+          normalizedPullFilter(request.filter),
+        );
+      case "ack-inbox":
+        return this.options.backend.ackInbox(normalizedAckKeys(request.keys));
+      case "catch-up":
+        return this.options.backend.catchUp();
       case "clear-inbox":
         return this.options.backend.clearInbox();
       default:

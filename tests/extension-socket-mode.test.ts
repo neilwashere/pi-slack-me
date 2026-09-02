@@ -69,6 +69,26 @@ class FakeInboxClient implements GlobalSlackInbox {
     return this.messages.slice(-limit);
   }
 
+  async pullInbox() {
+    return [];
+  }
+
+  async ackInbox(keys: readonly string[]) {
+    return keys.length;
+  }
+
+  async catchUp() {
+    return {
+      added: 0,
+      scanned: 0,
+      scopes: 0,
+      truncated: false,
+      errors: [],
+      startedAt: "1.000000",
+      completedAt: "2.000000",
+    };
+  }
+
   async clearInbox() {
     const count = this.messages.length;
     this.messages.length = 0;

@@ -61,24 +61,29 @@ function registerSlackMe(
   const workspace = dependencies.workspace ?? createSlackWorkspace();
   const presenter = dependencies.presenter ?? createSlackResultPresenter();
 
+  // ctx is optional because the tool surface has no ExtensionContext: tools
+  // only need the connection, while the footer subscription needs a UI. The
+  // subscription is attached on the first call that supplies a ctx, so a
+  // tool-first connection still gets a footer once the session starts.
   const ensureInbox = (
-    ctx: ExtensionContext,
+    ctx?: ExtensionContext,
   ): Promise<GlobalSlackInbox | undefined> => {
     const appToken = process.env.SLACK_APP_TOKEN?.trim();
     if (!appToken) return Promise.resolve(undefined);
-    if (connectPromise) return connectPromise;
     if (!inbox) {
-      const created =
+      inbox =
         dependencies.createGlobalInbox?.() ??
         createDefaultGlobalSlackInboxClient();
-      inbox = created;
-      unsubscribeInbox = created.subscribe((snapshot) =>
+    }
+    if (ctx && !unsubscribeInbox) {
+      unsubscribeInbox = inbox.subscribe((snapshot) =>
         ctx.ui.setStatus(
           SLACK_LISTENER_STATUS_KEY,
           formatListenerStatus(snapshot.status),
         ),
       );
     }
+    if (connectPromise) return connectPromise;
     const current = inbox;
     connectPromise = current.connect(clientIdentity()).then(
       () => {
@@ -104,7 +109,7 @@ function registerSlackMe(
     default: false,
   });
 
-  registerSlackTools(pi, workspace);
+  registerSlackTools(pi, workspace, () => ensureInbox());
   pi.registerCommand(
     "slack",
     createSlackCommand({

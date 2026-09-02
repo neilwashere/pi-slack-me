@@ -8,6 +8,16 @@ describe("formatListenerStatus", () => {
     );
   });
 
+  it("surfaces listener errors ahead of connection state", () => {
+    expect(
+      formatListenerStatus({
+        state: "connected",
+        unread: 2,
+        lastError: "Slack Socket Mode: inbox full",
+      }),
+    ).toBe("Slack: error · 2 unread");
+  });
+
   it.each([
     ["reconnecting", "Slack: reconnecting · 3 unread"],
     ["disconnected", "Slack: disconnected · 3 unread"],

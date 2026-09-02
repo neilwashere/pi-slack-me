@@ -21,6 +21,11 @@ import type {
   SlackInboxMessage,
   SlackListenerStatus,
 } from "../lib/slack-events";
+import {
+  inboxKey,
+  type SlackInboxPullFilter,
+  type SlackInboxPullItem,
+} from "../lib/slack-inbox-store";
 
 class FakeInboxBackend implements SlackInboxBackend {
   private readonly listeners = new Set<
@@ -53,6 +58,48 @@ class FakeInboxBackend implements SlackInboxBackend {
     for (const message of selected) message.unread = false;
     this.emitStatus();
     return selected.map(({ unread: _unread, ...message }) => message);
+  }
+
+  pullInbox(filter?: SlackInboxPullFilter): SlackInboxPullItem[] {
+    const selected = this.messages
+      .filter(
+        (message) =>
+          !filter?.fromUsers?.length ||
+          filter.fromUsers.includes(message.userId),
+      )
+      .slice(0, filter?.limit ?? 10);
+    return selected.map(({ unread: _unread, ...message }) => ({
+      ...message,
+      key: inboxKey(message.channelId, message.timestamp),
+      deliveryCount: 1,
+    }));
+  }
+
+  ackInbox(keys: readonly string[]): number {
+    let acked = 0;
+    for (const key of keys) {
+      const index = this.messages.findIndex(
+        (message) => inboxKey(message.channelId, message.timestamp) === key,
+      );
+      if (index >= 0) {
+        this.messages.splice(index, 1);
+        acked += 1;
+      }
+    }
+    this.emitStatus();
+    return acked;
+  }
+
+  async catchUp() {
+    return {
+      added: 0,
+      scanned: 0,
+      scopes: 0,
+      truncated: false,
+      errors: [],
+      startedAt: "1.000000",
+      completedAt: "2.000000",
+    };
   }
 
   clearInbox(): number {
@@ -427,5 +474,53 @@ describe("GlobalSlackInbox", () => {
       state: "connected",
       unread: 0,
     });
+  });
+
+  it("carries a pull filter to the sidecar and an ack back", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "pi-slack-pull-test-"));
+    const socketPath = join(directory, "inbox.sock");
+    const backend = new FakeInboxBackend();
+    const server = new SlackSidecarServer({
+      socketPath,
+      backend,
+      idleTimeoutMs: 60_000,
+    });
+    await server.start();
+    const client = createGlobalSlackInboxClient({ socketPath });
+    resources.push({ servers: [server], clients: [client], directory });
+    await client.connect(identity("session-one"));
+    backend.receive(message);
+
+    const pulled = await client.pullInbox({ fromUsers: [message.userId] });
+    expect(pulled).toHaveLength(1);
+    expect(pulled[0]?.key).toBe(`${message.channelId}:${message.timestamp}`);
+
+    await expect(client.pullInbox({ fromUsers: ["UNOBODY"] })).resolves.toEqual(
+      [],
+    );
+    await expect(client.ackInbox([pulled[0]?.key ?? ""])).resolves.toBe(1);
+    await expect(client.pullInbox()).resolves.toEqual([]);
+    await expect(client.catchUp()).resolves.toMatchObject({
+      added: 0,
+      truncated: false,
+    });
+  });
+
+  it("rejects an ack filter that is not a list of strings", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "pi-slack-ack-test-"));
+    const socketPath = join(directory, "inbox.sock");
+    const server = new SlackSidecarServer({
+      socketPath,
+      backend: new FakeInboxBackend(),
+      idleTimeoutMs: 60_000,
+    });
+    await server.start();
+    const client = createGlobalSlackInboxClient({ socketPath });
+    resources.push({ servers: [server], clients: [client], directory });
+    await client.connect(identity("session-one"));
+
+    await expect(
+      client.ackInbox([42 as unknown as string]),
+    ).rejects.toThrow(/array of strings/);
   });
 });
