@@ -23,6 +23,11 @@ interface UserInfoResponse {
   user?: { name?: string };
 }
 
+interface SelfIdentity {
+  userId: string;
+  handle: string;
+}
+
 interface HistoryMessage {
   user?: string;
   text?: string;
@@ -128,10 +133,11 @@ export class SlackCatchUp {
       truncated: false,
       errors: [],
     };
-
-    await this.captureScope(result, "workspace mentions", () =>
-      this.catchUpMentions(result, floor, cutoff),
-    );
+    const trackedThreads = this.options.store.trackedThreads();
+    let selfIdentity: SelfIdentity | undefined;
+    await this.captureScope(result, "current user", async () => {
+      selfIdentity = await this.resolveSelfIdentity();
+    });
 
     const channels = new Map<
       string,
@@ -149,23 +155,43 @@ export class SlackCatchUp {
     await this.captureScope(result, "direct conversations", () =>
       this.discoverDirectConversations(result, channels),
     );
-    for (const [channelId, known] of channels) {
-      if (this.messageLimitReached(result)) {
-        result.truncated = true;
-        break;
-      }
-      await this.captureScope(result, `conversation ${channelId}`, () =>
-        this.catchUpChannel(
-          result,
-          channelId,
-          known.channelType ?? inferConversationType(channelId),
-          maxTimestamp(known.timestamp, floor),
-          cutoff,
-        ),
+    await this.catchUpChannels(
+      result,
+      [...channels].filter(([channelId, channel]) =>
+        isDirectConversation(channel.channelType, channelId),
+      ),
+      floor,
+      cutoff,
+      Math.max(1, Math.floor(this.maxMessages() / 2)),
+    );
+
+    if (this.messageLimitReached(result)) {
+      result.truncated = true;
+    } else if (selfIdentity) {
+      await this.captureScope(result, "workspace mentions", () =>
+        this.catchUpMentions(result, floor, cutoff, selfIdentity as SelfIdentity),
       );
     }
 
-    for (const thread of this.options.store.trackedThreads()) {
+    for (const channel of this.options.store.knownChannels()) {
+      if (!channels.has(channel.channelId)) {
+        channels.set(channel.channelId, {
+          channelType: channel.channelType,
+          timestamp: channel.timestamp,
+        });
+      }
+    }
+    await this.catchUpChannels(
+      result,
+      [...channels].filter(
+        ([channelId, channel]) =>
+          !isDirectConversation(channel.channelType, channelId),
+      ),
+      floor,
+      cutoff,
+    );
+
+    for (const thread of trackedThreads) {
       if (this.messageLimitReached(result)) {
         result.truncated = true;
         break;
@@ -206,11 +232,7 @@ export class SlackCatchUp {
     }
   }
 
-  private async catchUpMentions(
-    result: MutableCatchUpResult,
-    lookbackFloor: string,
-    cutoff: string,
-  ): Promise<void> {
+  private async resolveSelfIdentity(): Promise<SelfIdentity> {
     this.assertAvailable();
     const auth = await slackGetWithRetry<AuthTestResponse>(
       this.options.transport,
@@ -229,7 +251,16 @@ export class SlackCatchUp {
       handle = info.user?.name;
     }
     if (!handle) throw new Error("Slack did not return the current user handle.");
+    return { userId: auth.user_id, handle };
+  }
 
+  private async catchUpMentions(
+    result: MutableCatchUpResult,
+    lookbackFloor: string,
+    cutoff: string,
+    identity: SelfIdentity,
+  ): Promise<void> {
+    this.assertAvailable();
     const floor = maxTimestamp(
       this.options.store.watermark("mentions"),
       lookbackFloor,
@@ -238,14 +269,15 @@ export class SlackCatchUp {
     let page = 1;
     let lastProcessed = floor;
     let complete = true;
-    const maxPages = this.maxPages();
+    const maxPages =
+      this.options.maxPagesPerScope === undefined ? 20 : this.maxPages();
     while (page <= maxPages) {
       this.assertAvailable();
       const response = await slackGetWithRetry<SearchResponse>(
         this.options.transport,
         "search.messages",
         {
-          query: `@${handle} after:${afterDate}`,
+          query: `@${identity.handle} after:${afterDate}`,
           sort: "timestamp",
           sort_dir: "asc",
           count: PAGE_SIZE,
@@ -261,7 +293,9 @@ export class SlackCatchUp {
           conversationTypeFromSearch(match),
           match,
         );
-        if (!message || !message.text.includes(`<@${auth.user_id}>`)) continue;
+        if (!message || !message.text.includes(`<@${identity.userId}>`)) {
+          continue;
+        }
         if (!this.reserveMessage(result)) {
           complete = false;
           break;
@@ -287,6 +321,36 @@ export class SlackCatchUp {
       "mentions",
       complete ? cutoff : lastProcessed,
     );
+  }
+
+  private async catchUpChannels(
+    result: MutableCatchUpResult,
+    channels: Array<
+      [
+        string,
+        { channelType?: SlackConversationType; timestamp?: string },
+      ]
+    >,
+    floor: string,
+    cutoff: string,
+    scanCeiling = this.maxMessages(),
+  ): Promise<void> {
+    for (const [channelId, known] of channels) {
+      if (this.messageLimitReached(result, scanCeiling)) {
+        result.truncated = true;
+        break;
+      }
+      await this.captureScope(result, `conversation ${channelId}`, () =>
+        this.catchUpChannel(
+          result,
+          channelId,
+          known.channelType ?? inferConversationType(channelId),
+          maxTimestamp(known.timestamp, floor),
+          cutoff,
+          scanCeiling,
+        ),
+      );
+    }
   }
 
   private async discoverDirectConversations(
@@ -337,6 +401,7 @@ export class SlackCatchUp {
     channelType: SlackConversationType,
     initialFloor: string,
     initialCutoff: string,
+    scanCeiling = this.maxMessages(),
   ): Promise<void> {
     const scope = channelWatermarkKey(channelId);
     const continuation = this.options.store.recoveryContinuation(scope);
@@ -368,7 +433,7 @@ export class SlackCatchUp {
           if (raw.ts < latest) latest = raw.ts;
           continue;
         }
-        if (!this.reserveMessage(result)) {
+        if (!this.reserveMessage(result, scanCeiling)) {
           complete = false;
           break;
         }
@@ -491,8 +556,11 @@ export class SlackCatchUp {
     );
   }
 
-  private reserveMessage(result: MutableCatchUpResult): boolean {
-    if (this.messageLimitReached(result)) {
+  private reserveMessage(
+    result: MutableCatchUpResult,
+    scanCeiling = this.maxMessages(),
+  ): boolean {
+    if (this.messageLimitReached(result, scanCeiling)) {
       result.truncated = true;
       return false;
     }
@@ -500,8 +568,15 @@ export class SlackCatchUp {
     return true;
   }
 
-  private messageLimitReached(result: MutableCatchUpResult): boolean {
-    return result.scanned >= Math.max(1, this.options.maxMessages ?? DEFAULT_MAX_MESSAGES);
+  private messageLimitReached(
+    result: MutableCatchUpResult,
+    scanCeiling = this.maxMessages(),
+  ): boolean {
+    return result.scanned >= scanCeiling;
+  }
+
+  private maxMessages(): number {
+    return Math.max(1, this.options.maxMessages ?? DEFAULT_MAX_MESSAGES);
   }
 
   private maxPages(): number {
@@ -539,6 +614,14 @@ function conversationTypeFromSearch(match: SearchMatch): SlackConversationType {
   return "channel";
 }
 
+function isDirectConversation(
+  channelType: SlackConversationType | undefined,
+  channelId: string,
+): boolean {
+  const inferred = channelType ?? inferConversationType(channelId);
+  return inferred === "im" || inferred === "mpim";
+}
+
 function inferConversationType(channelId: string): SlackConversationType {
   if (channelId.startsWith("D")) return "im";
   if (channelId.startsWith("G")) return "group";
@@ -561,7 +644,6 @@ function slackTimestamp(epochMs: number): string {
 }
 
 function searchAfterDate(timestamp: string): string {
-  return new Date(Number.parseFloat(timestamp) * 1_000)
-    .toISOString()
-    .slice(0, 10);
+  const twoDaysBefore = Number.parseFloat(timestamp) * 1_000 - 48 * 60 * 60_000;
+  return new Date(twoDaysBefore).toISOString().slice(0, 10);
 }

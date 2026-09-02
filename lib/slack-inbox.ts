@@ -17,8 +17,22 @@ export function parseWatchedChannels(value: string | undefined): string[] {
 
 export function formatListenerStatus(status: SlackListenerStatus): string {
   if (status.lastError) {
+    const durability = status.durabilityDisabled
+      ? " · durability disabled"
+      : "";
     const unread = status.unread > 0 ? ` · ${status.unread} unread` : "";
-    return `Slack: error${unread}`;
+    return `Slack: error${durability}${unread}`;
+  }
+  if (
+    status.state === "connected" &&
+    (status.catchUpIncomplete || status.recoveryNotice)
+  ) {
+    const notices = [
+      status.recoveryNotice ? "inbox recovered" : undefined,
+      status.catchUpIncomplete ? "catch-up incomplete" : undefined,
+    ].filter(Boolean);
+    const unread = status.unread > 0 ? ` · ${status.unread} unread` : "";
+    return `Slack: connected · ${notices.join(" · ")}${unread}`;
   }
   if (status.state === "connected" && status.unread > 0) {
     return `Slack: ${status.unread} unread`;

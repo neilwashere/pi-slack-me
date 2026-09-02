@@ -83,6 +83,46 @@ describe("Slack sidecar process lock", () => {
     }
   });
 
+  it("does not steal a process-only lock from a live owner", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "pi-slack-lock-test-"));
+    directories.push(directory);
+    const lockPath = join(directory, "inbox.writer.lock");
+    await writeFile(lockPath, `${process.pid}:active-owner\n`, { mode: 0o600 });
+    const old = new Date(Date.now() - 10_000);
+    await utimes(lockPath, old, old);
+
+    const lock = await acquireSlackSidecarLock(lockPath, {
+      probeSocketPath: false,
+    });
+
+    expect(lock).toBeUndefined();
+  });
+
+  it("recovers a writer lock after PID reuse when its owner socket is gone", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "pi-slack-lock-test-"));
+    directories.push(directory);
+    const socketPath = join(directory, "sidecar.sock");
+    const lockPath = join(directory, "inbox.writer.lock");
+    await writeFile(
+      lockPath,
+      `${JSON.stringify({
+        processId: process.pid,
+        nonce: "old-owner",
+        probeSocketPath: socketPath,
+      })}\n`,
+      { mode: 0o600 },
+    );
+    const old = new Date(Date.now() - 10_000);
+    await utimes(lockPath, old, old);
+
+    const lock = await acquireSlackSidecarLock(lockPath, {
+      probeSocketPath: socketPath,
+    });
+
+    expect(lock).toBeDefined();
+    await lock?.release();
+  });
+
   it("recovers a lock whose owner process no longer exists", async () => {
     const directory = await mkdtemp(join(tmpdir(), "pi-slack-lock-test-"));
     directories.push(directory);

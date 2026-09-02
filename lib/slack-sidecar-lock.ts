@@ -18,9 +18,41 @@ function processIsAlive(processId: number): boolean {
   }
 }
 
-function lockProcessId(value: string): number | undefined {
-  const parsed = Number.parseInt(value.split(":", 1)[0] ?? "", 10);
-  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
+interface LockMetadata {
+  processId?: number;
+  probeSocketPath?: string;
+}
+
+function lockMetadata(value: string): LockMetadata {
+  try {
+    const parsed = JSON.parse(value) as {
+      processId?: unknown;
+      probeSocketPath?: unknown;
+    };
+    if (typeof parsed !== "object" || parsed === null) {
+      throw new TypeError("Legacy lock format.");
+    }
+    return {
+      processId:
+        typeof parsed.processId === "number" &&
+        Number.isSafeInteger(parsed.processId) &&
+        parsed.processId > 0
+          ? parsed.processId
+          : undefined,
+      probeSocketPath:
+        typeof parsed.probeSocketPath === "string"
+          ? parsed.probeSocketPath
+          : undefined,
+    };
+  } catch {
+    const processId = Number.parseInt(value.split(":", 1)[0] ?? "", 10);
+    return {
+      processId:
+        Number.isSafeInteger(processId) && processId > 0
+          ? processId
+          : undefined,
+    };
+  }
 }
 
 async function readOptional(path: string): Promise<string> {
@@ -57,14 +89,18 @@ function socketIsReachable(socketPath: string): Promise<boolean> {
   });
 }
 
-async function removeStaleLock(lockPath: string): Promise<boolean> {
+async function removeStaleLock(
+  lockPath: string,
+  fallbackProbeSocketPath: string | false,
+): Promise<boolean> {
   let value: string;
   try {
     value = await readFile(lockPath, "utf8");
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === "ENOENT";
   }
-  const processId = lockProcessId(value);
+  const metadata = lockMetadata(value);
+  const processId = metadata.processId;
   let lockStat;
   try {
     lockStat = await stat(lockPath);
@@ -75,10 +111,10 @@ async function removeStaleLock(lockPath: string): Promise<boolean> {
   const isRecent = Date.now() - lockStat.mtimeMs < INCOMPLETE_LOCK_GRACE_MS;
   if (processId && processIsAlive(processId)) {
     if (isRecent) return false;
-    const socketPath = lockPath.endsWith(".lock")
-      ? lockPath.slice(0, -".lock".length)
-      : undefined;
-    if (!socketPath || (await socketIsReachable(socketPath))) return false;
+    const socketPath = metadata.probeSocketPath ?? fallbackProbeSocketPath;
+    if (socketPath === false || (await socketIsReachable(socketPath))) {
+      return false;
+    }
   } else if (!processId && isRecent) {
     return false;
   }
@@ -94,8 +130,19 @@ async function removeStaleLock(lockPath: string): Promise<boolean> {
 
 export async function acquireSlackSidecarLock(
   lockPath: string,
+  options: { probeSocketPath?: string | false } = {},
 ): Promise<SlackSidecarLock | undefined> {
-  const token = `${process.pid}:${randomUUID()}\n`;
+  const defaultProbeSocketPath = lockPath.endsWith(".lock")
+    ? lockPath.slice(0, -".lock".length)
+    : false;
+  const probeSocketPath =
+    options.probeSocketPath ?? defaultProbeSocketPath;
+  const token = `${JSON.stringify({
+    processId: process.pid,
+    nonce: randomUUID(),
+    probeSocketPath:
+      probeSocketPath === false ? undefined : probeSocketPath,
+  })}\n`;
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
       const handle = await open(lockPath, "wx", 0o600);
@@ -115,7 +162,9 @@ export async function acquireSlackSidecarLock(
       };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      if (!(await removeStaleLock(lockPath))) return undefined;
+      if (!(await removeStaleLock(lockPath, probeSocketPath))) {
+        return undefined;
+      }
     }
   }
   return undefined;

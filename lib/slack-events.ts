@@ -54,6 +54,10 @@ function socketFailure(error: unknown): Error {
   return new Error(sanitizeSocketError(error));
 }
 
+function lifecycleChangedError(): Error {
+  return new Error("Slack listener lifecycle changed during catch-up.");
+}
+
 export interface SocketModeClientLike {
   on(event: string, listener: (payload: unknown) => void): void;
   start(): Promise<unknown>;
@@ -86,6 +90,9 @@ export interface SlackListenerStatus {
   state: SlackListenerState;
   unread: number;
   lastError?: string;
+  catchUpIncomplete?: boolean;
+  recoveryNotice?: string;
+  durabilityDisabled?: boolean;
 }
 
 export interface SlackThreadTracker {
@@ -167,6 +174,7 @@ interface EnqueueMessage {
   attentionKind: SlackInboxMessage["attentionKind"];
   lifecycle: number;
   trackParticipation: boolean;
+  strictLifecycle: boolean;
 }
 
 export class SlackEventListener {
@@ -189,11 +197,19 @@ export class SlackEventListener {
   private startPromise?: Promise<void>;
   private stopPromise?: Promise<void>;
   private socketStartPromise?: Promise<unknown>;
-  private lastError?: string;
+  private connectionError?: string;
+  private externalError?: string;
+  private readonly recoveryNotice?: string;
+  private readonly durabilityDisabled: boolean;
+  private catchUpIncomplete = false;
 
   constructor(options: SlackEventListenerOptions) {
     this.socket = options.socket;
     this.store = options.store ?? new SlackInboxStore();
+    this.durabilityDisabled = this.store.durabilityDisabled();
+    const startupNotice = this.store.startupNotice();
+    if (this.durabilityDisabled) this.externalError = startupNotice;
+    else this.recoveryNotice = startupNotice;
     this.directory = options.directory ?? createSlackDirectory();
     this.threadTracker = options.threadTracker;
     this.watchedChannels = new Set(options.watchedChannels ?? []);
@@ -211,10 +227,7 @@ export class SlackEventListener {
       if (this.desiredRunning) this.setState("reconnecting");
     });
     this.socket.on("connected", () => {
-      if (!this.desiredRunning) return;
-      this.reconnectBackoffStep = 0;
-      this.connectionErrorReported = false;
-      this.setState("connected");
+      if (this.desiredRunning) this.markConnected();
     });
     this.socket.on("disconnected", () => {
       if (!this.desiredRunning) {
@@ -326,17 +339,29 @@ export class SlackEventListener {
       state: this.state,
       unread: this.store.counts().unread,
     };
-    if (this.lastError) status.lastError = this.lastError;
+    const lastError = this.connectionError ?? this.externalError;
+    if (lastError) status.lastError = lastError;
+    if (this.catchUpIncomplete) status.catchUpIncomplete = true;
+    if (this.recoveryNotice) status.recoveryNotice = this.recoveryNotice;
+    if (this.durabilityDisabled) status.durabilityDisabled = true;
     return status;
   }
 
+  setCatchUpIncomplete(incomplete: boolean): void {
+    if (this.catchUpIncomplete === incomplete) return;
+    this.catchUpIncomplete = incomplete;
+    this.emitStatus();
+  }
+
   reportExternalError(error: unknown): void {
-    this.reportError(error);
+    if (this.durabilityDisabled) return;
+    this.externalError = `Slack: ${sanitizeSocketError(error)}`;
+    this.emitStatus();
   }
 
   clearExternalError(): void {
-    if (!this.lastError) return;
-    this.lastError = undefined;
+    if (this.durabilityDisabled || !this.externalError) return;
+    this.externalError = undefined;
     this.emitStatus();
   }
 
@@ -394,9 +419,7 @@ export class SlackEventListener {
       await this.startSocket();
 
       if (!this.desiredRunning || lifecycle !== this.lifecycle) return;
-      this.reconnectBackoffStep = 0;
-      this.connectionErrorReported = false;
-      this.setState("connected");
+      this.markConnected();
     } catch (error) {
       const failure = socketFailure(error);
       if (this.desiredRunning && lifecycle === this.lifecycle) {
@@ -501,6 +524,7 @@ export class SlackEventListener {
       envelope.body?.event_id ?? inboxKey(event.channel, event.ts),
       lifecycle,
       true,
+      false,
     );
   }
 
@@ -510,12 +534,13 @@ export class SlackEventListener {
 
   /** Admit one message recovered through the Web API after an offline gap. */
   ingestBackfill(event: OrdinarySlackMessage): Promise<boolean> {
-    if (!this.desiredRunning) return Promise.resolve(false);
+    if (!this.desiredRunning) return Promise.reject(lifecycleChangedError());
     return this.processMessage(
       event,
       `backfill:${inboxKey(event.channel, event.ts)}`,
       this.lifecycle,
       false,
+      true,
     );
   }
 
@@ -524,7 +549,12 @@ export class SlackEventListener {
     eventId: string,
     lifecycle: number,
     trackParticipation: boolean,
+    strictLifecycle: boolean,
   ): Promise<boolean> {
+    if (lifecycle !== this.lifecycle) {
+      if (strictLifecycle) throw lifecycleChangedError();
+      return false;
+    }
     const selfUserId = this.selfUserId;
     if (!selfUserId) return false;
     if (event.user === selfUserId) {
@@ -551,6 +581,7 @@ export class SlackEventListener {
       attentionKind: disposition === "watched" ? undefined : disposition,
       lifecycle,
       trackParticipation,
+      strictLifecycle,
     });
   }
 
@@ -612,12 +643,16 @@ export class SlackEventListener {
     attentionKind,
     lifecycle,
     trackParticipation,
+    strictLifecycle,
   }: EnqueueMessage): Promise<boolean> {
     const [userName, channelName] = await Promise.all([
       this.directory.userName(event.user),
       this.directory.channelName(event.channel),
     ]);
-    if (!this.desiredRunning || lifecycle !== this.lifecycle) return false;
+    if (!this.desiredRunning || lifecycle !== this.lifecycle) {
+      if (strictLifecycle) throw lifecycleChangedError();
+      return false;
+    }
 
     const message: SlackInboxMessage = {
       eventId,
@@ -648,9 +683,17 @@ export class SlackEventListener {
     this.onStatusChange?.(this.status());
   }
 
+  private markConnected(): void {
+    this.clearReconnectTimer();
+    this.reconnectBackoffStep = 0;
+    this.connectionErrorReported = false;
+    this.connectionError = undefined;
+    this.setState("connected");
+  }
+
   private reportError(error: unknown): void {
     const message = `Slack Socket Mode: ${sanitizeSocketError(error)}`;
-    this.lastError = message;
+    this.connectionError = message;
     this.emitStatus();
     try {
       this.onError?.(message);

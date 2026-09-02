@@ -1,5 +1,4 @@
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
 import { access } from "node:fs/promises";
 import { createConnection, type Socket } from "node:net";
 import { join } from "node:path";
@@ -10,6 +9,7 @@ import type {
   SlackInboxPullFilter,
   SlackInboxPullItem,
 } from "./slack-inbox-store";
+import { slackIdentityHash } from "./slack-identity";
 import {
   SLACK_SIDECAR_PROTOCOL_VERSION,
   type GlobalSlackInboxSnapshot,
@@ -50,11 +50,17 @@ type PendingRequest = {
   reject(error: Error): void;
 };
 
+type ConnectionWaiter = {
+  resolve(): void;
+  reject(error: Error): void;
+};
+
 class UnixGlobalSlackInbox implements GlobalSlackInbox {
   private readonly listeners = new Set<
     (snapshot: GlobalSlackInboxSnapshot) => void
   >();
   private readonly pending = new Map<string, PendingRequest>();
+  private readonly connectionWaiters = new Set<ConnectionWaiter>();
   private socket?: Socket;
   private identity?: SlackInboxClientIdentity;
   private buffer = "";
@@ -63,6 +69,7 @@ class UnixGlobalSlackInbox implements GlobalSlackInbox {
   private connectionPromise?: Promise<void>;
   private reconnectTimer?: ReturnType<typeof setTimeout>;
   private reconnectAttempts = 0;
+  private connectInitialized = false;
   private closed = false;
 
   constructor(private readonly options: GlobalSlackInboxClientOptions) {}
@@ -70,9 +77,16 @@ class UnixGlobalSlackInbox implements GlobalSlackInbox {
   async connect(identity: SlackInboxClientIdentity): Promise<void> {
     if (this.closed) throw new Error("Slack inbox client is closed.");
     this.identity = identity;
+    if (this.socket && !this.socket.destroyed) return;
+    if (
+      this.connectInitialized &&
+      (this.connectionPromise || this.reconnectTimer)
+    ) {
+      await this.waitForConnection();
+      return;
+    }
+    this.connectInitialized = true;
     this.reconnectAttempts = 0;
-    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-    this.reconnectTimer = undefined;
     try {
       await this.ensureConnected();
     } catch (error) {
@@ -133,7 +147,9 @@ class UnixGlobalSlackInbox implements GlobalSlackInbox {
     this.reconnectTimer = undefined;
     const socket = this.socket;
     this.socket = undefined;
-    this.rejectPending(new Error("Slack inbox client closed."));
+    const closedError = new Error("Slack inbox client closed.");
+    this.rejectPending(closedError);
+    this.rejectConnectionWaiters(closedError);
     if (!socket || socket.destroyed) return;
     await new Promise<void>((resolve) => {
       const timeout = setTimeout(() => socket.destroy(), 500);
@@ -185,6 +201,7 @@ class UnixGlobalSlackInbox implements GlobalSlackInbox {
       });
       this.reconnectAttempts = 0;
       this.publish(snapshot);
+      this.resolveConnectionWaiters();
     } catch (error) {
       this.handleDisconnect(
         socket,
@@ -330,6 +347,9 @@ class UnixGlobalSlackInbox implements GlobalSlackInbox {
           unread: this.lastSnapshot?.status.unread ?? 0,
         },
       });
+      this.rejectConnectionWaiters(
+        new Error("Slack inbox sidecar reconnect attempts were exhausted."),
+      );
       return;
     }
     const baseDelay = this.options.retryDelayMs ?? 250;
@@ -351,6 +371,22 @@ class UnixGlobalSlackInbox implements GlobalSlackInbox {
     this.reconnectTimer.unref?.();
   }
 
+  private waitForConnection(): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      this.connectionWaiters.add({ resolve, reject });
+    });
+  }
+
+  private resolveConnectionWaiters(): void {
+    for (const waiter of this.connectionWaiters) waiter.resolve();
+    this.connectionWaiters.clear();
+  }
+
+  private rejectConnectionWaiters(error: Error): void {
+    for (const waiter of this.connectionWaiters) waiter.reject(error);
+    this.connectionWaiters.clear();
+  }
+
   private rejectPending(error: Error): void {
     for (const pending of this.pending.values()) pending.reject(error);
     this.pending.clear();
@@ -367,15 +403,7 @@ export function defaultSlackSidecarSocketPath(): string {
   const override = process.env.PI_SLACK_SIDECAR_SOCKET?.trim();
   if (override) return override;
   const user = process.getuid?.() ?? process.env.USER ?? "default";
-  const credentialIdentity = [
-    process.env.SLACK_APP_TOKEN ?? "",
-    process.env.SLACK_USER_TOKEN ?? "",
-  ].join("\0");
-  const credentialHash = createHash("sha256")
-    .update(credentialIdentity)
-    .digest("hex")
-    .slice(0, 16);
-  const name = `v${SLACK_SIDECAR_PROTOCOL_VERSION}-${credentialHash}`;
+  const name = `v${SLACK_SIDECAR_PROTOCOL_VERSION}-${slackIdentityHash()}`;
   if (process.platform === "win32") {
     return `\\\\.\\pipe\\pi-slack-me-${user}-${name}`;
   }

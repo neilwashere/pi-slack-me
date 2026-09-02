@@ -42,7 +42,11 @@ export function createSlackInboxBackend(
       const justConnected =
         status.state === "connected" && previousState !== "connected";
       previousState = status.state;
-      if (justConnected) void runCatchUp();
+      if (justConnected) {
+        void runCatchUp().catch((error) =>
+          eventListener.reportExternalError(error),
+        );
+      }
     },
     onAttention: (message) => emit({ type: "attention", message }),
   });
@@ -60,15 +64,9 @@ export function createSlackInboxBackend(
       );
     }
     const result = await catchUp.run();
-    if (result.truncated || result.errors.length > 0) {
-      eventListener.reportExternalError(
-        new Error(
-          `catch-up incomplete (${result.errors.length} error(s), truncated=${String(result.truncated)}).`,
-        ),
-      );
-    } else {
-      eventListener.clearExternalError();
-    }
+    const incomplete = result.truncated || result.errors.length > 0;
+    eventListener.setCatchUpIncomplete(incomplete);
+    if (!incomplete) eventListener.clearExternalError();
     return result;
   };
 

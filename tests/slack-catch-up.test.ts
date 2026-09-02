@@ -123,6 +123,42 @@ describe("SlackCatchUp", () => {
     expect(store.watermark("mentions")).toBe(result.startedAt);
   });
 
+  it("searches far enough back to recover same-day mentions", async () => {
+    let now = NOW_MS;
+    const queries: string[] = [];
+    const get = vi.fn(
+      async (
+        method: string,
+        options?: { query?: Record<string, string | number | undefined> },
+      ) => {
+        if (method === "auth.test") {
+          return { user: "neil", user_id: "USELF" };
+        }
+        if (method === "search.messages") {
+          queries.push(String(options?.query?.query));
+          return emptySearch();
+        }
+        throw new Error(`Unexpected method ${method}`);
+      },
+    ) as SlackTransport["get"];
+    const runner = new SlackCatchUp({
+      transport: transport(get),
+      store,
+      watchedChannels: [],
+      ingest: vi.fn(async () => true),
+      now: () => now,
+    });
+
+    await runner.run();
+    now += 60_000;
+    await runner.run();
+
+    expect(queries).toEqual([
+      "@neil after:2026-08-30",
+      "@neil after:2026-08-31",
+    ]);
+  });
+
   it("discovers and recovers a DM first opened while offline", async () => {
     const get = vi.fn(async (method: string) => {
       if (method === "auth.test") return { user: "neil", user_id: "USELF" };
@@ -135,7 +171,9 @@ describe("SlackCatchUp", () => {
       }
       if (method === "conversations.history") {
         return {
-          messages: [{ user: "USAM", text: "new issue", ts: NEW_TS }],
+          messages: [
+            { user: "USAM", text: "<@USELF> new issue", ts: NEW_TS },
+          ],
           response_metadata: {},
         };
       }
@@ -158,12 +196,80 @@ describe("SlackCatchUp", () => {
       expect.objectContaining({
         channel: "DNEW",
         channel_type: "im",
-        text: "new issue",
+        text: "<@USELF> new issue",
       }),
     );
     expect(store.knownChannels()).toEqual([
       expect.objectContaining({ channelId: "DNEW", channelType: "im" }),
     ]);
+    expect(store.trackedThreads()).toEqual([
+      expect.objectContaining({ channelId: "DNEW", threadTimestamp: NEW_TS }),
+    ]);
+  });
+
+  it("prioritizes newly discovered DMs ahead of bulk channel history", async () => {
+    store.rememberChannels([{ channelId: "CBUSY", channelType: "channel" }]);
+    const requestedChannels: string[] = [];
+    const get = vi.fn(
+      async (
+        method: string,
+        options?: { query?: Record<string, string | number | undefined> },
+      ) => {
+        if (method === "auth.test") {
+          return { user: "neil", user_id: "USELF" };
+        }
+        if (method === "search.messages") {
+          return {
+            messages: {
+              matches: [
+                {
+                  channel: { id: "CMENTION", is_channel: true },
+                  user: "USAM",
+                  text: "<@USELF> second issue",
+                  ts: NEW_TS,
+                },
+              ],
+              paging: { page: 1, pages: 1 },
+            },
+          };
+        }
+        if (method === "users.conversations") {
+          return {
+            channels: [{ id: "DNEW", is_im: true }],
+            response_metadata: {},
+          };
+        }
+        if (method === "conversations.history") {
+          const channel = String(options?.query?.channel);
+          requestedChannels.push(channel);
+          return {
+            messages: [{ user: "USAM", text: "issue", ts: NEW_TS }],
+            response_metadata: {},
+          };
+        }
+        throw new Error(`Unexpected method ${method}`);
+      },
+    ) as SlackTransport["get"];
+    const runner = new SlackCatchUp({
+      transport: transport(get, true),
+      store,
+      watchedChannels: [],
+      ingest: vi.fn(async () => true),
+      maxMessages: 2,
+      now: () => NOW_MS,
+    });
+
+    const result = await runner.run();
+
+    expect(result).toMatchObject({ added: 2, truncated: true });
+    expect(requestedChannels).toEqual(["DNEW"]);
+    expect(store.trackedThreads()).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ channelId: "DNEW" })]),
+    );
+    expect(get).toHaveBeenCalledWith(
+      "search.messages",
+      expect.objectContaining({ query: expect.objectContaining({}) }),
+    );
   });
 
   it("continues known-conversation recovery when search scope is missing", async () => {

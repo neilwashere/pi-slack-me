@@ -11,6 +11,7 @@ import {
   type GlobalSlackInbox,
   type GlobalSlackInboxSnapshot,
 } from "../lib/global-slack-inbox.js";
+import { slackIdentityHash } from "../lib/slack-identity.js";
 import {
   prepareSlackSidecarDirectory,
   SlackSidecarServer,
@@ -22,6 +23,7 @@ import type {
   SlackListenerStatus,
 } from "../lib/slack-events";
 import {
+  defaultSlackInboxStorePath,
   inboxKey,
   type SlackInboxPullFilter,
   type SlackInboxPullItem,
@@ -207,6 +209,37 @@ describe("GlobalSlackInbox", () => {
     expect(second).not.toContain("second-secret");
   });
 
+  it("keeps the sidecar lock and inbox aligned through token rotation", () => {
+    const previousAgentDirectory = process.env.PI_CODING_AGENT_DIR;
+    const previousAppToken = process.env.SLACK_APP_TOKEN;
+    const previousUserToken = process.env.SLACK_USER_TOKEN;
+    try {
+      process.env.PI_CODING_AGENT_DIR = join(tmpdir(), "pi-slack-identity-test");
+      process.env.SLACK_APP_TOKEN = "xapp-1-A111-old-secret";
+      process.env.SLACK_USER_TOKEN = "xoxe.xoxp-111-222-old-secret";
+      const identityHash = slackIdentityHash();
+      const firstSocket = defaultSlackSidecarSocketPath();
+      const firstStore = defaultSlackInboxStorePath();
+      process.env.SLACK_APP_TOKEN = "xapp-1-A111-new-secret";
+      process.env.SLACK_USER_TOKEN = "xoxe.xoxp-111-222-new-secret";
+
+      expect(defaultSlackSidecarSocketPath()).toBe(firstSocket);
+      expect(defaultSlackInboxStorePath()).toBe(firstStore);
+      expect(firstSocket).toContain(identityHash);
+      expect(firstStore).toContain(identityHash);
+    } finally {
+      if (previousAppToken === undefined) delete process.env.SLACK_APP_TOKEN;
+      else process.env.SLACK_APP_TOKEN = previousAppToken;
+      if (previousUserToken === undefined) delete process.env.SLACK_USER_TOKEN;
+      else process.env.SLACK_USER_TOKEN = previousUserToken;
+      if (previousAgentDirectory === undefined) {
+        delete process.env.PI_CODING_AGENT_DIR;
+      } else {
+        process.env.PI_CODING_AGENT_DIR = previousAgentDirectory;
+      }
+    }
+  });
+
   it("reports a missing sidecar bundle before entering reconnect backoff", async () => {
     const directory = await mkdtemp(join(tmpdir(), "pi-slack-bundle-test-"));
     resources.push({ servers: [], clients: [], directory });
@@ -290,11 +323,48 @@ describe("GlobalSlackInbox", () => {
     await expect(client.connect(identity("failed-session"))).rejects.toThrow(
       "sidecar launch failed",
     );
+    await expect(client.connect(identity("failed-session"))).rejects.toThrow(
+      "reconnect attempts were exhausted",
+    );
 
     await vi.waitFor(() => expect(launchSidecar).toHaveBeenCalledTimes(3));
     await vi.waitFor(() => expect(snapshots.at(-1)?.state).toBe("error"));
     await new Promise((resolve) => setTimeout(resolve, 25));
     expect(launchSidecar).toHaveBeenCalledTimes(3);
+  });
+
+  it("re-arms connection after the reconnect budget is exhausted", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "pi-slack-rearm-test-"));
+    const socketPath = join(directory, "inbox.sock");
+    const servers: SlackSidecarServer[] = [];
+    let available = false;
+    const launchSidecar = vi.fn(async () => {
+      if (!available) throw new Error("sidecar unavailable");
+      const server = new SlackSidecarServer({
+        socketPath,
+        backend: new FakeInboxBackend(),
+        idleTimeoutMs: 60_000,
+      });
+      servers.push(server);
+      await server.start();
+    });
+    const client = createGlobalSlackInboxClient({
+      socketPath,
+      launchSidecar,
+      retryDelayMs: 1,
+      maxReconnectAttempts: 1,
+    });
+    resources.push({ servers, clients: [client], directory });
+
+    await expect(client.connect(identity("rearm-session"))).rejects.toThrow(
+      "sidecar unavailable",
+    );
+    await vi.waitFor(() => expect(launchSidecar).toHaveBeenCalledTimes(2));
+    available = true;
+
+    await client.connect(identity("rearm-session"));
+
+    await expect(client.readInbox()).resolves.toEqual([]);
   });
 
   it("relaunches and reconnects when the sidecar exits", async () => {
@@ -323,7 +393,13 @@ describe("GlobalSlackInbox", () => {
     await client.connect(identity("reconnecting-session"));
 
     await servers[0]?.close();
+    await vi.waitFor(() =>
+      expect(snapshots.at(-1)?.state).toBe("reconnecting"),
+    );
 
+    await client.connect(identity("reconnecting-session"));
+
+    await expect(client.readInbox()).resolves.toEqual([]);
     await vi.waitFor(() => expect(launchSidecar).toHaveBeenCalledTimes(2));
     await vi.waitFor(() =>
       expect(snapshots.at(-1)).toEqual({ state: "connected", unread: 0 }),

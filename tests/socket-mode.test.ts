@@ -1479,6 +1479,84 @@ describe("SlackEventListener", () => {
     ]);
   });
 
+  it("clears external errors independently from catch-up completeness", () => {
+    const listener = new SlackEventListener({ socket: new FakeSocketClient() });
+    listener.reportExternalError(new Error("catch-up failed"));
+    listener.setCatchUpIncomplete(true);
+    listener.clearExternalError();
+
+    expect(listener.status().lastError).toBeUndefined();
+    expect(listener.status().catchUpIncomplete).toBe(true);
+  });
+
+  it("clears a transient socket error after reconnecting", async () => {
+    const socket = new FakeSocketClient();
+    const listener = new SlackEventListener({
+      socket,
+      directory: {
+        selfUserId: vi.fn(async () => "USELF"),
+        userName: vi.fn(async () => "Sam"),
+        channelName: vi.fn(async () => "triage"),
+      },
+    });
+    await listener.start();
+    socket.emit("error", new Error("read ECONNRESET"));
+    expect(listener.status().lastError).toContain("ECONNRESET");
+
+    socket.emit("connected", undefined);
+
+    expect(listener.status().lastError).toBeUndefined();
+    expect(listener.status().state).toBe("connected");
+  });
+
+  it("rejects backfill while the listener is stopped", async () => {
+    const listener = new SlackEventListener({ socket: new FakeSocketClient() });
+
+    await expect(
+      listener.ingestBackfill({
+        type: "message",
+        channel: "C123",
+        channel_type: "channel",
+        user: "USAM",
+        text: "<@USELF> investigate",
+        ts: "1786020000.000100",
+      }),
+    ).rejects.toThrow("lifecycle changed");
+  });
+
+  it("rejects a backfill item when the listener lifecycle changes", async () => {
+    let releaseUserName: ((name: string) => void) | undefined;
+    const directory = {
+      selfUserId: vi.fn(async () => "USELF"),
+      userName: vi.fn(
+        () =>
+          new Promise<string>((resolve) => {
+            releaseUserName = resolve;
+          }),
+      ),
+      channelName: vi.fn(async () => "triage"),
+    };
+    const socket = new FakeSocketClient();
+    const listener = new SlackEventListener({ socket, directory });
+    await listener.start();
+    const ingest = listener.ingestBackfill({
+      type: "message",
+      channel: "C123",
+      channel_type: "channel",
+      user: "USAM",
+      text: "<@USELF> investigate",
+      ts: "1786020000.000100",
+    });
+    await vi.waitFor(() => expect(directory.userName).toHaveBeenCalled());
+
+    socket.emit("disconnected", undefined);
+    await listener.start();
+    releaseUserName?.("Sam");
+
+    await expect(ingest).rejects.toThrow("lifecycle changed");
+    expect(listener.status().unread).toBe(0);
+  });
+
   it("captures a private-channel mention", async () => {
     stubDirectoryFetch();
     const socket = new FakeSocketClient();

@@ -1,5 +1,12 @@
+// lib/slack-sidecar-entry.ts
+import { randomUUID as randomUUID3 } from "node:crypto";
+import { mkdirSync as mkdirSync2, writeFileSync as writeFileSync2 } from "node:fs";
+import { mkdir as mkdir2 } from "node:fs/promises";
+import { homedir as homedir2 } from "node:os";
+import { dirname as dirname3, join as join3 } from "node:path";
+
 // lib/slack-inbox-store.ts
-import { createHash } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
@@ -9,6 +16,19 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+
+// lib/slack-identity.ts
+import { createHash } from "node:crypto";
+function slackIdentityHash(userToken = process.env.SLACK_USER_TOKEN ?? "", appToken = process.env.SLACK_APP_TOKEN ?? "") {
+  const normalizedUserToken = userToken.replace(/^xoxe\./, "");
+  const userParts = normalizedUserToken.split("-");
+  const userIdentity = userParts[0] === "xoxp" && userParts[1] && userParts[2] ? `${userParts[1]}:${userParts[2]}` : normalizedUserToken;
+  const appParts = appToken.split("-");
+  const appIdentity = appParts[0] === "xapp" && appParts[1] && appParts[2] ? `${appParts[1]}:${appParts[2]}` : appToken;
+  return createHash("sha256").update(`${userIdentity}\0${appIdentity}`).digest("hex").slice(0, 16);
+}
+
+// lib/slack-inbox-store.ts
 var MAX_RETAINED_MESSAGES = 1e3;
 var MAX_SEEN_KEYS = 1e3;
 var DEFAULT_LEASE_MS = 5 * 6e4;
@@ -22,12 +42,11 @@ function channelWatermarkKey(channelId) {
 function defaultSlackInboxStorePath() {
   const override = process.env.PI_SLACK_INBOX_STORE?.trim();
   if (override) return override;
-  const piDir = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
-  const userToken = process.env.SLACK_USER_TOKEN ?? "";
-  const tokenParts = userToken.split("-");
-  const stableUserIdentity = tokenParts[0] === "xoxp" && tokenParts[1] && tokenParts[2] ? `${tokenParts[1]}:${tokenParts[2]}` : userToken;
-  const credentialHash = createHash("sha256").update(stableUserIdentity).digest("hex").slice(0, 16);
-  return join(piDir, `pi-slack-me-inbox-${credentialHash}.json`);
+  const piDir = process.env.PI_CODING_AGENT_DIR?.trim() || join(homedir(), ".pi", "agent");
+  return join(
+    piDir,
+    `pi-slack-me-inbox-v${STORE_VERSION}-${slackIdentityHash()}.json`
+  );
 }
 function normalizeMatchValue(value) {
   return value.trim().toLowerCase().replace(/^@/, "");
@@ -35,6 +54,7 @@ function normalizeMatchValue(value) {
 var SlackInboxStore = class {
   path;
   now;
+  renameFile;
   records = /* @__PURE__ */ new Map();
   seenKeys = /* @__PURE__ */ new Set();
   seenKeyOrder = [];
@@ -42,9 +62,12 @@ var SlackInboxStore = class {
   threads = /* @__PURE__ */ new Map();
   channels = /* @__PURE__ */ new Map();
   continuations = /* @__PURE__ */ new Map();
+  recoveryNotice;
+  persistenceDisabled = false;
   constructor(options = {}) {
     this.path = options.path ?? defaultSlackInboxStorePath();
     this.now = options.now ?? Date.now;
+    this.renameFile = options.renameFile ?? renameSync;
     this.load();
   }
   /**
@@ -52,6 +75,12 @@ var SlackInboxStore = class {
    * cheap pre-check for callers that would otherwise do API work to
    * classify a message add() is about to reject.
    */
+  startupNotice() {
+    return this.recoveryNotice;
+  }
+  durabilityDisabled() {
+    return this.persistenceDisabled;
+  }
   isSeen(key) {
     return this.records.has(key) || this.seenKeys.has(key);
   }
@@ -68,7 +97,6 @@ var SlackInboxStore = class {
       );
     }
     return this.commit(() => {
-      this.rememberKey(key);
       this.records.set(key, {
         ...message,
         key,
@@ -149,7 +177,10 @@ var SlackInboxStore = class {
     );
     if (retainedKeys.length === 0) return 0;
     return this.commit(() => {
-      for (const key of retainedKeys) this.records.delete(key);
+      for (const key of retainedKeys) {
+        this.records.delete(key);
+        this.rememberKey(key);
+      }
       return retainedKeys.length;
     });
   }
@@ -158,6 +189,7 @@ var SlackInboxStore = class {
     const count = this.records.size;
     if (count === 0) return 0;
     return this.commit(() => {
+      for (const key of this.records.keys()) this.rememberKey(key);
       this.records.clear();
       return count;
     });
@@ -313,16 +345,22 @@ var SlackInboxStore = class {
     try {
       parsed = JSON.parse(readFileSync(this.path, "utf8"));
     } catch (error) {
-      throw new Error(
-        `Slack inbox store is unreadable or corrupt at ${this.path}: ${error instanceof Error ? error.message : String(error)}`
+      this.quarantineStore(
+        `unreadable or corrupt: ${error instanceof Error ? error.message : String(error)}`
       );
+      return;
     }
     if (parsed?.version !== STORE_VERSION) {
-      throw new Error(
-        `Slack inbox store at ${this.path} has unsupported version ${String(parsed?.version)}.`
+      this.quarantineStore(
+        `unsupported version ${String(parsed?.version)}; expected ${STORE_VERSION}`
       );
+      return;
     }
-    for (const key of parsed.seenKeys ?? []) {
+    if (!Array.isArray(parsed.seenKeys) || !Array.isArray(parsed.records) || !Array.isArray(parsed.trackedThreads) || !isRecord(parsed.watermarks) || !isRecord(parsed.channels) || !isRecord(parsed.continuations) || !parsed.records.every(isSlackInboxRecord)) {
+      this.quarantineStore("invalid version 3 data structure");
+      return;
+    }
+    for (const key of parsed.seenKeys) {
       if (typeof key === "string") this.rememberKey(key);
     }
     for (const record of parsed.records ?? []) {
@@ -354,7 +392,32 @@ var SlackInboxStore = class {
       }
     }
   }
+  quarantineStore(reason) {
+    const quarantinePath = `${this.path}.corrupt-${this.now()}-${process.pid}-${randomUUID()}`;
+    try {
+      this.renameFile(this.path, quarantinePath);
+      this.recoveryNotice = `Slack inbox store was quarantined at ${quarantinePath}: ${reason}`;
+    } catch (error) {
+      this.persistenceDisabled = true;
+      this.recoveryNotice = `Slack inbox store could not be quarantined; durable writes are disabled: ${error instanceof Error ? error.message : String(error)}`;
+    }
+    try {
+      writeFileSync(
+        `${this.path}.recovery-${randomUUID()}.log`,
+        `${this.recoveryNotice}
+`,
+        {
+          encoding: "utf8",
+          flag: "wx",
+          mode: 384
+        }
+      );
+    } catch {
+      this.recoveryNotice += " (the recovery log could not be written)";
+    }
+  }
   persist() {
+    if (this.persistenceDisabled) return;
     const payload = {
       version: STORE_VERSION,
       records: [...this.records.values()],
@@ -370,9 +433,47 @@ var SlackInboxStore = class {
       encoding: "utf8",
       mode: 384
     });
-    renameSync(temporaryPath, this.path);
+    this.renameFile(temporaryPath, this.path);
   }
 };
+function isSlackInboxRecord(value) {
+  if (!isRecord(value)) return false;
+  const stringFields = [
+    "key",
+    "eventId",
+    "channelId",
+    "channelName",
+    "userId",
+    "userName",
+    "text",
+    "timestamp"
+  ];
+  if (stringFields.some((field) => typeof value[field] !== "string")) {
+    return false;
+  }
+  if (value.key !== inboxKey(String(value.channelId), String(value.timestamp))) {
+    return false;
+  }
+  if (typeof value.unread !== "boolean" || typeof value.isMention !== "boolean") {
+    return false;
+  }
+  if (typeof value.deliveryCount !== "number" || !Number.isSafeInteger(value.deliveryCount) || value.deliveryCount < 0) {
+    return false;
+  }
+  if (value.leaseExpiresAt !== void 0 && (typeof value.leaseExpiresAt !== "number" || !Number.isFinite(value.leaseExpiresAt))) {
+    return false;
+  }
+  if (value.threadTimestamp !== void 0 && typeof value.threadTimestamp !== "string") {
+    return false;
+  }
+  if (value.channelType !== void 0 && value.channelType !== "channel" && value.channelType !== "group" && value.channelType !== "im" && value.channelType !== "mpim") {
+    return false;
+  }
+  return value.attentionKind === void 0 || value.attentionKind === "mention" || value.attentionKind === "thread-reply" || value.attentionKind === "direct-message";
+}
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 function boundedLimit(limit) {
   if (!Number.isFinite(limit)) return 10;
   return Math.min(100, Math.max(0, Math.trunc(limit)));
@@ -671,11 +772,11 @@ var SlackCatchUp = class {
       truncated: false,
       errors: []
     };
-    await this.captureScope(
-      result,
-      "workspace mentions",
-      () => this.catchUpMentions(result, floor, cutoff)
-    );
+    const trackedThreads = this.options.store.trackedThreads();
+    let selfIdentity;
+    await this.captureScope(result, "current user", async () => {
+      selfIdentity = await this.resolveSelfIdentity();
+    });
     const channels = /* @__PURE__ */ new Map();
     for (const channel of this.options.store.knownChannels()) {
       channels.set(channel.channelId, {
@@ -691,24 +792,41 @@ var SlackCatchUp = class {
       "direct conversations",
       () => this.discoverDirectConversations(result, channels)
     );
-    for (const [channelId, known] of channels) {
-      if (this.messageLimitReached(result)) {
-        result.truncated = true;
-        break;
-      }
+    await this.catchUpChannels(
+      result,
+      [...channels].filter(
+        ([channelId, channel]) => isDirectConversation(channel.channelType, channelId)
+      ),
+      floor,
+      cutoff,
+      Math.max(1, Math.floor(this.maxMessages() / 2))
+    );
+    if (this.messageLimitReached(result)) {
+      result.truncated = true;
+    } else if (selfIdentity) {
       await this.captureScope(
         result,
-        `conversation ${channelId}`,
-        () => this.catchUpChannel(
-          result,
-          channelId,
-          known.channelType ?? inferConversationType(channelId),
-          maxTimestamp(known.timestamp, floor),
-          cutoff
-        )
+        "workspace mentions",
+        () => this.catchUpMentions(result, floor, cutoff, selfIdentity)
       );
     }
-    for (const thread of this.options.store.trackedThreads()) {
+    for (const channel of this.options.store.knownChannels()) {
+      if (!channels.has(channel.channelId)) {
+        channels.set(channel.channelId, {
+          channelType: channel.channelType,
+          timestamp: channel.timestamp
+        });
+      }
+    }
+    await this.catchUpChannels(
+      result,
+      [...channels].filter(
+        ([channelId, channel]) => !isDirectConversation(channel.channelType, channelId)
+      ),
+      floor,
+      cutoff
+    );
+    for (const thread of trackedThreads) {
       if (this.messageLimitReached(result)) {
         result.truncated = true;
         break;
@@ -741,7 +859,7 @@ var SlackCatchUp = class {
       );
     }
   }
-  async catchUpMentions(result, lookbackFloor, cutoff) {
+  async resolveSelfIdentity() {
     this.assertAvailable();
     const auth = await slackGetWithRetry(
       this.options.transport,
@@ -760,6 +878,10 @@ var SlackCatchUp = class {
       handle = info.user?.name;
     }
     if (!handle) throw new Error("Slack did not return the current user handle.");
+    return { userId: auth.user_id, handle };
+  }
+  async catchUpMentions(result, lookbackFloor, cutoff, identity) {
+    this.assertAvailable();
     const floor = maxTimestamp(
       this.options.store.watermark("mentions"),
       lookbackFloor
@@ -768,14 +890,14 @@ var SlackCatchUp = class {
     let page = 1;
     let lastProcessed = floor;
     let complete = true;
-    const maxPages = this.maxPages();
+    const maxPages = this.options.maxPagesPerScope === void 0 ? 20 : this.maxPages();
     while (page <= maxPages) {
       this.assertAvailable();
       const response = await slackGetWithRetry(
         this.options.transport,
         "search.messages",
         {
-          query: `@${handle} after:${afterDate}`,
+          query: `@${identity.handle} after:${afterDate}`,
           sort: "timestamp",
           sort_dir: "asc",
           count: PAGE_SIZE,
@@ -791,7 +913,9 @@ var SlackCatchUp = class {
           conversationTypeFromSearch(match),
           match
         );
-        if (!message || !message.text.includes(`<@${auth.user_id}>`)) continue;
+        if (!message || !message.text.includes(`<@${identity.userId}>`)) {
+          continue;
+        }
         if (!this.reserveMessage(result)) {
           complete = false;
           break;
@@ -817,6 +941,26 @@ var SlackCatchUp = class {
       "mentions",
       complete ? cutoff : lastProcessed
     );
+  }
+  async catchUpChannels(result, channels, floor, cutoff, scanCeiling = this.maxMessages()) {
+    for (const [channelId, known] of channels) {
+      if (this.messageLimitReached(result, scanCeiling)) {
+        result.truncated = true;
+        break;
+      }
+      await this.captureScope(
+        result,
+        `conversation ${channelId}`,
+        () => this.catchUpChannel(
+          result,
+          channelId,
+          known.channelType ?? inferConversationType(channelId),
+          maxTimestamp(known.timestamp, floor),
+          cutoff,
+          scanCeiling
+        )
+      );
+    }
   }
   async discoverDirectConversations(result, channels) {
     let cursor;
@@ -850,7 +994,7 @@ var SlackCatchUp = class {
     this.assertAvailable();
     this.options.store.rememberChannels(discovered);
   }
-  async catchUpChannel(result, channelId, channelType, initialFloor, initialCutoff) {
+  async catchUpChannel(result, channelId, channelType, initialFloor, initialCutoff, scanCeiling = this.maxMessages()) {
     const scope = channelWatermarkKey(channelId);
     const continuation = this.options.store.recoveryContinuation(scope);
     const floor = continuation?.floor ?? initialFloor;
@@ -881,7 +1025,7 @@ var SlackCatchUp = class {
           if (raw.ts < latest) latest = raw.ts;
           continue;
         }
-        if (!this.reserveMessage(result)) {
+        if (!this.reserveMessage(result, scanCeiling)) {
           complete = false;
           break;
         }
@@ -987,16 +1131,19 @@ var SlackCatchUp = class {
       message.channel_type
     );
   }
-  reserveMessage(result) {
-    if (this.messageLimitReached(result)) {
+  reserveMessage(result, scanCeiling = this.maxMessages()) {
+    if (this.messageLimitReached(result, scanCeiling)) {
       result.truncated = true;
       return false;
     }
     result.scanned += 1;
     return true;
   }
-  messageLimitReached(result) {
-    return result.scanned >= Math.max(1, this.options.maxMessages ?? DEFAULT_MAX_MESSAGES);
+  messageLimitReached(result, scanCeiling = this.maxMessages()) {
+    return result.scanned >= scanCeiling;
+  }
+  maxMessages() {
+    return Math.max(1, this.options.maxMessages ?? DEFAULT_MAX_MESSAGES);
   }
   maxPages() {
     return Math.max(
@@ -1026,6 +1173,10 @@ function conversationTypeFromSearch(match) {
   if (match.channel?.is_group) return "group";
   return "channel";
 }
+function isDirectConversation(channelType, channelId) {
+  const inferred = channelType ?? inferConversationType(channelId);
+  return inferred === "im" || inferred === "mpim";
+}
 function inferConversationType(channelId) {
   if (channelId.startsWith("D")) return "im";
   if (channelId.startsWith("G")) return "group";
@@ -1041,7 +1192,8 @@ function slackTimestamp(epochMs) {
   return (epochMs / 1e3).toFixed(6);
 }
 function searchAfterDate(timestamp) {
-  return new Date(Number.parseFloat(timestamp) * 1e3).toISOString().slice(0, 10);
+  const twoDaysBefore = Number.parseFloat(timestamp) * 1e3 - 48 * 60 * 6e4;
+  return new Date(twoDaysBefore).toISOString().slice(0, 10);
 }
 
 // lib/slack-transport.ts
@@ -1195,6 +1347,9 @@ function sanitizeSocketError(error) {
 function socketFailure(error) {
   return new Error(sanitizeSocketError(error));
 }
+function lifecycleChangedError() {
+  return new Error("Slack listener lifecycle changed during catch-up.");
+}
 function isOrdinaryMessage(event) {
   if (!event || event.type !== "message") return false;
   if (event.channel_type !== "channel" && event.channel_type !== "group" && event.channel_type !== "im" && event.channel_type !== "mpim") {
@@ -1225,10 +1380,18 @@ var SlackEventListener = class {
   startPromise;
   stopPromise;
   socketStartPromise;
-  lastError;
+  connectionError;
+  externalError;
+  recoveryNotice;
+  durabilityDisabled;
+  catchUpIncomplete = false;
   constructor(options) {
     this.socket = options.socket;
     this.store = options.store ?? new SlackInboxStore();
+    this.durabilityDisabled = this.store.durabilityDisabled();
+    const startupNotice = this.store.startupNotice();
+    if (this.durabilityDisabled) this.externalError = startupNotice;
+    else this.recoveryNotice = startupNotice;
     this.directory = options.directory ?? createSlackDirectory();
     this.threadTracker = options.threadTracker;
     this.watchedChannels = new Set(options.watchedChannels ?? []);
@@ -1246,10 +1409,7 @@ var SlackEventListener = class {
       if (this.desiredRunning) this.setState("reconnecting");
     });
     this.socket.on("connected", () => {
-      if (!this.desiredRunning) return;
-      this.reconnectBackoffStep = 0;
-      this.connectionErrorReported = false;
-      this.setState("connected");
+      if (this.desiredRunning) this.markConnected();
     });
     this.socket.on("disconnected", () => {
       if (!this.desiredRunning) {
@@ -1347,15 +1507,26 @@ var SlackEventListener = class {
       state: this.state,
       unread: this.store.counts().unread
     };
-    if (this.lastError) status.lastError = this.lastError;
+    const lastError = this.connectionError ?? this.externalError;
+    if (lastError) status.lastError = lastError;
+    if (this.catchUpIncomplete) status.catchUpIncomplete = true;
+    if (this.recoveryNotice) status.recoveryNotice = this.recoveryNotice;
+    if (this.durabilityDisabled) status.durabilityDisabled = true;
     return status;
   }
+  setCatchUpIncomplete(incomplete) {
+    if (this.catchUpIncomplete === incomplete) return;
+    this.catchUpIncomplete = incomplete;
+    this.emitStatus();
+  }
   reportExternalError(error) {
-    this.reportError(error);
+    if (this.durabilityDisabled) return;
+    this.externalError = `Slack: ${sanitizeSocketError(error)}`;
+    this.emitStatus();
   }
   clearExternalError() {
-    if (!this.lastError) return;
-    this.lastError = void 0;
+    if (this.durabilityDisabled || !this.externalError) return;
+    this.externalError = void 0;
     this.emitStatus();
   }
   readInbox(limit = 10) {
@@ -1405,9 +1576,7 @@ var SlackEventListener = class {
       if (!this.desiredRunning || lifecycle !== this.lifecycle) return;
       await this.startSocket();
       if (!this.desiredRunning || lifecycle !== this.lifecycle) return;
-      this.reconnectBackoffStep = 0;
-      this.connectionErrorReported = false;
-      this.setState("connected");
+      this.markConnected();
     } catch (error) {
       const failure = socketFailure(error);
       if (this.desiredRunning && lifecycle === this.lifecycle) {
@@ -1498,7 +1667,8 @@ var SlackEventListener = class {
       event,
       envelope.body?.event_id ?? inboxKey(event.channel, event.ts),
       lifecycle,
-      true
+      true,
+      false
     );
   }
   canIngestBackfill() {
@@ -1506,15 +1676,20 @@ var SlackEventListener = class {
   }
   /** Admit one message recovered through the Web API after an offline gap. */
   ingestBackfill(event) {
-    if (!this.desiredRunning) return Promise.resolve(false);
+    if (!this.desiredRunning) return Promise.reject(lifecycleChangedError());
     return this.processMessage(
       event,
       `backfill:${inboxKey(event.channel, event.ts)}`,
       this.lifecycle,
-      false
+      false,
+      true
     );
   }
-  async processMessage(event, eventId, lifecycle, trackParticipation) {
+  async processMessage(event, eventId, lifecycle, trackParticipation, strictLifecycle) {
+    if (lifecycle !== this.lifecycle) {
+      if (strictLifecycle) throw lifecycleChangedError();
+      return false;
+    }
     const selfUserId = this.selfUserId;
     if (!selfUserId) return false;
     if (event.user === selfUserId) {
@@ -1540,7 +1715,8 @@ var SlackEventListener = class {
       isMention: disposition === "mention",
       attentionKind: disposition === "watched" ? void 0 : disposition,
       lifecycle,
-      trackParticipation
+      trackParticipation,
+      strictLifecycle
     });
   }
   async classify(event, selfUserId) {
@@ -1587,13 +1763,17 @@ var SlackEventListener = class {
     isMention,
     attentionKind,
     lifecycle,
-    trackParticipation
+    trackParticipation,
+    strictLifecycle
   }) {
     const [userName, channelName] = await Promise.all([
       this.directory.userName(event.user),
       this.directory.channelName(event.channel)
     ]);
-    if (!this.desiredRunning || lifecycle !== this.lifecycle) return false;
+    if (!this.desiredRunning || lifecycle !== this.lifecycle) {
+      if (strictLifecycle) throw lifecycleChangedError();
+      return false;
+    }
     const message = {
       eventId,
       channelId: event.channel,
@@ -1620,9 +1800,16 @@ var SlackEventListener = class {
   emitStatus() {
     this.onStatusChange?.(this.status());
   }
+  markConnected() {
+    this.clearReconnectTimer();
+    this.reconnectBackoffStep = 0;
+    this.connectionErrorReported = false;
+    this.connectionError = void 0;
+    this.setState("connected");
+  }
   reportError(error) {
     const message = `Slack Socket Mode: ${sanitizeSocketError(error)}`;
-    this.lastError = message;
+    this.connectionError = message;
     this.emitStatus();
     try {
       this.onError?.(message);
@@ -1758,7 +1945,11 @@ function createSlackInboxBackend(options) {
       emit({ type: "status", status });
       const justConnected = status.state === "connected" && previousState !== "connected";
       previousState = status.state;
-      if (justConnected) void runCatchUp();
+      if (justConnected) {
+        void runCatchUp().catch(
+          (error) => eventListener.reportExternalError(error)
+        );
+      }
     },
     onAttention: (message) => emit({ type: "attention", message })
   });
@@ -1776,15 +1967,9 @@ function createSlackInboxBackend(options) {
       );
     }
     const result = await catchUp.run();
-    if (result.truncated || result.errors.length > 0) {
-      eventListener.reportExternalError(
-        new Error(
-          `catch-up incomplete (${result.errors.length} error(s), truncated=${String(result.truncated)}).`
-        )
-      );
-    } else {
-      eventListener.clearExternalError();
-    }
+    const incomplete = result.truncated || result.errors.length > 0;
+    eventListener.setCatchUpIncomplete(incomplete);
+    if (!incomplete) eventListener.clearExternalError();
     return result;
   };
   return {
@@ -1928,7 +2113,6 @@ var HerdrNotifier = class {
 };
 
 // lib/global-slack-inbox.ts
-import { createHash as createHash2 } from "node:crypto";
 import { join as join2 } from "node:path";
 
 // lib/slack-sidecar-protocol.ts
@@ -1940,12 +2124,7 @@ function defaultSlackSidecarSocketPath() {
   const override = process.env.PI_SLACK_SIDECAR_SOCKET?.trim();
   if (override) return override;
   const user = process.getuid?.() ?? process.env.USER ?? "default";
-  const credentialIdentity = [
-    process.env.SLACK_APP_TOKEN ?? "",
-    process.env.SLACK_USER_TOKEN ?? ""
-  ].join("\0");
-  const credentialHash = createHash2("sha256").update(credentialIdentity).digest("hex").slice(0, 16);
-  const name = `v${SLACK_SIDECAR_PROTOCOL_VERSION}-${credentialHash}`;
+  const name = `v${SLACK_SIDECAR_PROTOCOL_VERSION}-${slackIdentityHash()}`;
   if (process.platform === "win32") {
     return `\\\\.\\pipe\\pi-slack-me-${user}-${name}`;
   }
@@ -1953,7 +2132,7 @@ function defaultSlackSidecarSocketPath() {
 }
 
 // lib/slack-sidecar-lock.ts
-import { randomUUID } from "node:crypto";
+import { randomUUID as randomUUID2 } from "node:crypto";
 import { open, readFile, rename, stat, unlink } from "node:fs/promises";
 import { createConnection as createConnection2 } from "node:net";
 var INCOMPLETE_LOCK_GRACE_MS = 5e3;
@@ -1966,9 +2145,22 @@ function processIsAlive(processId) {
     return error.code !== "ESRCH";
   }
 }
-function lockProcessId(value) {
-  const parsed = Number.parseInt(value.split(":", 1)[0] ?? "", 10);
-  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : void 0;
+function lockMetadata(value) {
+  try {
+    const parsed = JSON.parse(value);
+    if (typeof parsed !== "object" || parsed === null) {
+      throw new TypeError("Legacy lock format.");
+    }
+    return {
+      processId: typeof parsed.processId === "number" && Number.isSafeInteger(parsed.processId) && parsed.processId > 0 ? parsed.processId : void 0,
+      probeSocketPath: typeof parsed.probeSocketPath === "string" ? parsed.probeSocketPath : void 0
+    };
+  } catch {
+    const processId = Number.parseInt(value.split(":", 1)[0] ?? "", 10);
+    return {
+      processId: Number.isSafeInteger(processId) && processId > 0 ? processId : void 0
+    };
+  }
 }
 async function readOptional(path) {
   try {
@@ -2001,14 +2193,15 @@ function socketIsReachable(socketPath) {
     socket.once("error", () => finish(false));
   });
 }
-async function removeStaleLock(lockPath) {
+async function removeStaleLock(lockPath, fallbackProbeSocketPath) {
   let value;
   try {
     value = await readFile(lockPath, "utf8");
   } catch (error) {
     return error.code === "ENOENT";
   }
-  const processId = lockProcessId(value);
+  const metadata = lockMetadata(value);
+  const processId = metadata.processId;
   let lockStat;
   try {
     lockStat = await stat(lockPath);
@@ -2019,12 +2212,14 @@ async function removeStaleLock(lockPath) {
   const isRecent = Date.now() - lockStat.mtimeMs < INCOMPLETE_LOCK_GRACE_MS;
   if (processId && processIsAlive(processId)) {
     if (isRecent) return false;
-    const socketPath = lockPath.endsWith(".lock") ? lockPath.slice(0, -".lock".length) : void 0;
-    if (!socketPath || await socketIsReachable(socketPath)) return false;
+    const socketPath = metadata.probeSocketPath ?? fallbackProbeSocketPath;
+    if (socketPath === false || await socketIsReachable(socketPath)) {
+      return false;
+    }
   } else if (!processId && isRecent) {
     return false;
   }
-  const stalePath = `${lockPath}.stale-${process.pid}-${randomUUID()}`;
+  const stalePath = `${lockPath}.stale-${process.pid}-${randomUUID2()}`;
   try {
     await rename(lockPath, stalePath);
   } catch (error) {
@@ -2033,8 +2228,14 @@ async function removeStaleLock(lockPath) {
   await removeIfPresent(stalePath);
   return true;
 }
-async function acquireSlackSidecarLock(lockPath) {
-  const token = `${process.pid}:${randomUUID()}
+async function acquireSlackSidecarLock(lockPath, options = {}) {
+  const defaultProbeSocketPath = lockPath.endsWith(".lock") ? lockPath.slice(0, -".lock".length) : false;
+  const probeSocketPath = options.probeSocketPath ?? defaultProbeSocketPath;
+  const token = `${JSON.stringify({
+    processId: process.pid,
+    nonce: randomUUID2(),
+    probeSocketPath: probeSocketPath === false ? void 0 : probeSocketPath
+  })}
 `;
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
@@ -2055,7 +2256,9 @@ async function acquireSlackSidecarLock(lockPath) {
       };
     } catch (error) {
       if (error.code !== "EEXIST") throw error;
-      if (!await removeStaleLock(lockPath)) return void 0;
+      if (!await removeStaleLock(lockPath, probeSocketPath)) {
+        return void 0;
+      }
     }
   }
   return void 0;
@@ -2338,34 +2541,65 @@ async function run() {
   await prepareSlackSidecarDirectory(socketPath);
   const lock = await acquireSlackSidecarLock(`${socketPath}.lock`);
   if (!lock) return;
-  const appToken = process.env.SLACK_APP_TOKEN?.trim();
-  if (!appToken) {
+  const storePath = defaultSlackInboxStorePath();
+  let storeLock;
+  try {
+    await mkdir2(dirname3(storePath), { recursive: true, mode: 448 });
+    storeLock = await acquireSlackSidecarLock(`${storePath}.writer.lock`, {
+      probeSocketPath: socketPath
+    });
+  } catch (error) {
     await lock.release();
-    throw new Error("SLACK_APP_TOKEN is not configured for Slack Socket Mode.");
+    throw error;
   }
-  const notifier = new HerdrNotifier();
-  const server = new SlackSidecarServer({
-    socketPath,
-    backend: createSlackInboxBackend({ appToken }),
-    onAttention: (message, clients) => notifier.notify(message, clients)
-  });
+  if (!storeLock) {
+    await lock.release();
+    throw new Error("Slack inbox store is owned by another active sidecar.");
+  }
+  let server;
   let shuttingDown = false;
   const shutdown = async () => {
     if (shuttingDown) return;
     shuttingDown = true;
-    await server.close();
+    await server?.close();
+    await storeLock.release();
     await lock.release();
   };
-  process.once("SIGINT", () => void shutdown());
-  process.once("SIGTERM", () => void shutdown());
-  process.once("beforeExit", () => void shutdown());
   try {
+    const appToken = process.env.SLACK_APP_TOKEN?.trim();
+    if (!appToken) {
+      throw new Error("SLACK_APP_TOKEN is not configured for Slack Socket Mode.");
+    }
+    const notifier = new HerdrNotifier();
+    server = new SlackSidecarServer({
+      socketPath,
+      backend: createSlackInboxBackend({ appToken }),
+      onAttention: (message, clients) => notifier.notify(message, clients)
+    });
+    process.once("SIGINT", () => void shutdown());
+    process.once("SIGTERM", () => void shutdown());
+    process.once("beforeExit", () => void shutdown());
     await server.start();
   } catch (error) {
     await shutdown();
     throw error;
   }
 }
-void run().catch(() => {
+void run().catch((error) => {
+  const message = (error instanceof Error ? error.stack : String(error))?.replace(/\b(?:xapp|xox[a-z.]*)-[a-z0-9.-]+\b/gi, "[REDACTED]").replace(/\bwss:\/\/\S+/gi, "[REDACTED]");
+  try {
+    const diagnosticDirectory = process.env.PI_CODING_AGENT_DIR?.trim() || join3(homedir2(), ".pi", "agent");
+    mkdirSync2(diagnosticDirectory, { recursive: true, mode: 448 });
+    writeFileSync2(
+      join3(
+        diagnosticDirectory,
+        `pi-slack-sidecar-error-${process.pid}-${randomUUID3()}.log`
+      ),
+      `${message || "Slack sidecar failed without error details."}
+`,
+      { encoding: "utf8", flag: "wx", mode: 384 }
+    );
+  } catch {
+  }
   process.exitCode = 1;
 });

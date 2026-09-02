@@ -1,4 +1,10 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -260,11 +266,11 @@ describe("SlackInboxStore", () => {
 
   it("keeps the default store through app and user token rotation", () => {
     process.env.PI_CODING_AGENT_DIR = directory;
-    process.env.SLACK_APP_TOKEN = "xapp-old";
-    process.env.SLACK_USER_TOKEN = "xoxp-111-222-old-secret";
+    process.env.SLACK_APP_TOKEN = "xapp-1-A111-old-secret";
+    process.env.SLACK_USER_TOKEN = "xoxe.xoxp-111-222-old-secret";
     const beforeRotation = defaultSlackInboxStorePath();
-    process.env.SLACK_APP_TOKEN = "xapp-new";
-    process.env.SLACK_USER_TOKEN = "xoxp-111-222-new-secret";
+    process.env.SLACK_APP_TOKEN = "xapp-1-A111-new-secret";
+    process.env.SLACK_USER_TOKEN = "xoxe.xoxp-111-222-new-secret";
 
     expect(defaultSlackInboxStorePath()).toBe(beforeRotation);
   });
@@ -293,17 +299,94 @@ describe("SlackInboxStore", () => {
     expect(store.counts().pending).toBe(1_000);
   });
 
+  it("adds a tombstone when long-retained work is acknowledged", () => {
+    const store = new SlackInboxStore({ path: storePath });
+    for (let index = 1; index <= 900; index += 1) {
+      const suffix = String(index).padStart(6, "0");
+      store.add(message({ timestamp: `1786020000.${suffix}` }));
+    }
+    for (let index = 901; index <= 1_100; index += 1) {
+      const suffix = String(index).padStart(6, "0");
+      const key = inboxKey("C1", `1786020000.${suffix}`);
+      store.add(message({ timestamp: `1786020000.${suffix}` }));
+      store.ack([key]);
+    }
+    const oldestKey = inboxKey("C1", "1786020000.000001");
+
+    store.ack([oldestKey]);
+
+    expect(store.isSeen(oldestKey)).toBe(true);
+    expect(
+      store.add(message({ timestamp: "1786020000.000001" })),
+    ).toBe(false);
+  });
+
   it("starts empty when the store file does not exist", () => {
     const store = new SlackInboxStore({ path: join(directory, "missing.json") });
     expect(store.counts()).toEqual({ unread: 0, pending: 0 });
   });
 
-  it("refuses to overwrite a corrupt durable store", () => {
+  it("quarantines structurally invalid records before they can break reads", () => {
+    writeFileSync(
+      storePath,
+      JSON.stringify({
+        version: 3,
+        records: [{ key: "C1:1", channelId: "C1" }],
+        seenKeys: [],
+        watermarks: {},
+        trackedThreads: [],
+        channels: {},
+        continuations: {},
+      }),
+    );
+
+    const store = new SlackInboxStore({ path: storePath, now: () => 1234 });
+
+    expect(store.pull()).toEqual([]);
+    expect(store.startupNotice()).toContain("invalid version 3 data structure");
+  });
+
+  it("disables durability explicitly when quarantine cannot rename the file", () => {
+    writeFileSync(storePath, "{not-json");
+    const store = new SlackInboxStore({
+      path: storePath,
+      renameFile: () => {
+        throw new Error("permission denied");
+      },
+    });
+
+    expect(store.durabilityDisabled()).toBe(true);
+    expect(store.startupNotice()).toContain("durable writes are disabled");
+    expect(store.add(message())).toBe(true);
+    expect(store.counts().pending).toBe(1);
+    expect(readFileSync(storePath, "utf8")).toBe("{not-json");
+    expect(
+      readdirSync(directory).some((name) =>
+        name.startsWith("inbox.json.recovery-"),
+      ),
+    ).toBe(true);
+  });
+
+  it("quarantines a corrupt durable store and surfaces a recovery notice", () => {
     writeFileSync(storePath, "{not-json");
 
-    expect(() => new SlackInboxStore({ path: storePath })).toThrow(
-      "unreadable or corrupt",
+    const store = new SlackInboxStore({ path: storePath, now: () => 1234 });
+
+    expect(store.counts()).toEqual({ unread: 0, pending: 0 });
+    expect(store.startupNotice()).toContain("unreadable or corrupt");
+    const quarantineName = readdirSync(directory).find((name) =>
+      name.startsWith("inbox.json.corrupt-1234-"),
     );
-    expect(() => new SlackInboxStore({ path: storePath })).toThrow(storePath);
+    expect(quarantineName).toBeDefined();
+    expect(readFileSync(join(directory, quarantineName ?? ""), "utf8")).toBe(
+      "{not-json",
+    );
+    const recoveryLog = readdirSync(directory).find((name) =>
+      name.startsWith("inbox.json.recovery-"),
+    );
+    expect(recoveryLog).toBeDefined();
+    expect(readFileSync(join(directory, recoveryLog ?? ""), "utf8")).toContain(
+      quarantineName,
+    );
   });
 });

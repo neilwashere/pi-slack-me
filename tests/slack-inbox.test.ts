@@ -8,6 +8,27 @@ describe("formatListenerStatus", () => {
     );
   });
 
+  it("shows catch-up incompleteness without masking a healthy connection", () => {
+    expect(
+      formatListenerStatus({
+        state: "connected",
+        unread: 2,
+        catchUpIncomplete: true,
+      }),
+    ).toBe("Slack: connected · catch-up incomplete · 2 unread");
+  });
+
+  it("makes disabled durability explicit", () => {
+    expect(
+      formatListenerStatus({
+        state: "connected",
+        unread: 1,
+        lastError: "durable writes are disabled",
+        durabilityDisabled: true,
+      }),
+    ).toBe("Slack: error · durability disabled · 1 unread");
+  });
+
   it("surfaces listener errors ahead of connection state", () => {
     expect(
       formatListenerStatus({

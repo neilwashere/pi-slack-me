@@ -14,10 +14,9 @@
 // same message twice.
 //
 // SINGLE WRITER: exactly one sidecar owns a given store file, enforced upstream
-// by the sidecar socket lock. There is no file locking here, so pointing two
-// writers at one path will lose writes.
+// by a process lock keyed to the store path.
 
-import { createHash } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
@@ -28,6 +27,7 @@ import {
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { SlackInboxMessage } from "./slack-events";
+import { slackIdentityHash } from "./slack-identity";
 
 /**
  * Refuse new work past this bound rather than silently evicting unacked work.
@@ -110,18 +110,11 @@ export function defaultSlackInboxStorePath(): string {
   const override = process.env.PI_SLACK_INBOX_STORE?.trim();
   if (override) return override;
   const piDir =
-    process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
-  const userToken = process.env.SLACK_USER_TOKEN ?? "";
-  const tokenParts = userToken.split("-");
-  const stableUserIdentity =
-    tokenParts[0] === "xoxp" && tokenParts[1] && tokenParts[2]
-      ? `${tokenParts[1]}:${tokenParts[2]}`
-      : userToken;
-  const credentialHash = createHash("sha256")
-    .update(stableUserIdentity)
-    .digest("hex")
-    .slice(0, 16);
-  return join(piDir, `pi-slack-me-inbox-${credentialHash}.json`);
+    process.env.PI_CODING_AGENT_DIR?.trim() || join(homedir(), ".pi", "agent");
+  return join(
+    piDir,
+    `pi-slack-me-inbox-v${STORE_VERSION}-${slackIdentityHash()}.json`,
+  );
 }
 
 function normalizeMatchValue(value: string): string {
@@ -131,6 +124,7 @@ function normalizeMatchValue(value: string): string {
 export interface SlackInboxStoreOptions {
   path?: string;
   now?: () => number;
+  renameFile?: (source: string, destination: string) => void;
 }
 
 export interface SlackInboxAddOptions {
@@ -141,6 +135,7 @@ export interface SlackInboxAddOptions {
 export class SlackInboxStore {
   private readonly path: string;
   private readonly now: () => number;
+  private readonly renameFile: (source: string, destination: string) => void;
   private readonly records = new Map<string, SlackInboxRecord>();
   private readonly seenKeys = new Set<string>();
   private readonly seenKeyOrder: string[] = [];
@@ -154,10 +149,13 @@ export class SlackInboxStore {
     string,
     SlackRecoveryContinuation
   >();
+  private recoveryNotice?: string;
+  private persistenceDisabled = false;
 
   constructor(options: SlackInboxStoreOptions = {}) {
     this.path = options.path ?? defaultSlackInboxStorePath();
     this.now = options.now ?? Date.now;
+    this.renameFile = options.renameFile ?? renameSync;
     this.load();
   }
 
@@ -166,6 +164,14 @@ export class SlackInboxStore {
    * cheap pre-check for callers that would otherwise do API work to
    * classify a message add() is about to reject.
    */
+  startupNotice(): string | undefined {
+    return this.recoveryNotice;
+  }
+
+  durabilityDisabled(): boolean {
+    return this.persistenceDisabled;
+  }
+
   isSeen(key: string): boolean {
     return this.records.has(key) || this.seenKeys.has(key);
   }
@@ -186,7 +192,6 @@ export class SlackInboxStore {
       );
     }
     return this.commit(() => {
-      this.rememberKey(key);
       this.records.set(key, {
         ...message,
         key,
@@ -291,7 +296,10 @@ export class SlackInboxStore {
     );
     if (retainedKeys.length === 0) return 0;
     return this.commit(() => {
-      for (const key of retainedKeys) this.records.delete(key);
+      for (const key of retainedKeys) {
+        this.records.delete(key);
+        this.rememberKey(key);
+      }
       return retainedKeys.length;
     });
   }
@@ -301,6 +309,7 @@ export class SlackInboxStore {
     const count = this.records.size;
     if (count === 0) return 0;
     return this.commit(() => {
+      for (const key of this.records.keys()) this.rememberKey(key);
       this.records.clear();
       return count;
     });
@@ -503,18 +512,30 @@ export class SlackInboxStore {
     try {
       parsed = JSON.parse(readFileSync(this.path, "utf8")) as PersistedStore;
     } catch (error) {
-      throw new Error(
-        `Slack inbox store is unreadable or corrupt at ${this.path}: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
+      this.quarantineStore(
+        `unreadable or corrupt: ${error instanceof Error ? error.message : String(error)}`,
       );
+      return;
     }
     if (parsed?.version !== STORE_VERSION) {
-      throw new Error(
-        `Slack inbox store at ${this.path} has unsupported version ${String(parsed?.version)}.`,
+      this.quarantineStore(
+        `unsupported version ${String(parsed?.version)}; expected ${STORE_VERSION}`,
       );
+      return;
     }
-    for (const key of parsed.seenKeys ?? []) {
+    if (
+      !Array.isArray(parsed.seenKeys) ||
+      !Array.isArray(parsed.records) ||
+      !Array.isArray(parsed.trackedThreads) ||
+      !isRecord(parsed.watermarks) ||
+      !isRecord(parsed.channels) ||
+      !isRecord(parsed.continuations) ||
+      !parsed.records.every(isSlackInboxRecord)
+    ) {
+      this.quarantineStore("invalid version 3 data structure");
+      return;
+    }
+    for (const key of parsed.seenKeys) {
       if (typeof key === "string") this.rememberKey(key);
     }
     for (const record of parsed.records ?? []) {
@@ -560,7 +581,34 @@ export class SlackInboxStore {
     }
   }
 
+  private quarantineStore(reason: string): void {
+    const quarantinePath = `${this.path}.corrupt-${this.now()}-${process.pid}-${randomUUID()}`;
+    try {
+      this.renameFile(this.path, quarantinePath);
+      this.recoveryNotice = `Slack inbox store was quarantined at ${quarantinePath}: ${reason}`;
+    } catch (error) {
+      this.persistenceDisabled = true;
+      this.recoveryNotice = `Slack inbox store could not be quarantined; durable writes are disabled: ${
+        error instanceof Error ? error.message : String(error)
+      }`;
+    }
+    try {
+      writeFileSync(
+        `${this.path}.recovery-${randomUUID()}.log`,
+        `${this.recoveryNotice}\n`,
+        {
+          encoding: "utf8",
+          flag: "wx",
+          mode: 0o600,
+        },
+      );
+    } catch {
+      this.recoveryNotice += " (the recovery log could not be written)";
+    }
+  }
+
   private persist(): void {
+    if (this.persistenceDisabled) return;
     const payload: PersistedStore = {
       version: STORE_VERSION,
       records: [...this.records.values()],
@@ -576,8 +624,70 @@ export class SlackInboxStore {
       encoding: "utf8",
       mode: 0o600,
     });
-    renameSync(temporaryPath, this.path);
+    this.renameFile(temporaryPath, this.path);
   }
+}
+
+function isSlackInboxRecord(value: unknown): value is SlackInboxRecord {
+  if (!isRecord(value)) return false;
+  const stringFields = [
+    "key",
+    "eventId",
+    "channelId",
+    "channelName",
+    "userId",
+    "userName",
+    "text",
+    "timestamp",
+  ];
+  if (stringFields.some((field) => typeof value[field] !== "string")) {
+    return false;
+  }
+  if (value.key !== inboxKey(String(value.channelId), String(value.timestamp))) {
+    return false;
+  }
+  if (typeof value.unread !== "boolean" || typeof value.isMention !== "boolean") {
+    return false;
+  }
+  if (
+    typeof value.deliveryCount !== "number" ||
+    !Number.isSafeInteger(value.deliveryCount) ||
+    value.deliveryCount < 0
+  ) {
+    return false;
+  }
+  if (
+    value.leaseExpiresAt !== undefined &&
+    (typeof value.leaseExpiresAt !== "number" ||
+      !Number.isFinite(value.leaseExpiresAt))
+  ) {
+    return false;
+  }
+  if (
+    value.threadTimestamp !== undefined &&
+    typeof value.threadTimestamp !== "string"
+  ) {
+    return false;
+  }
+  if (
+    value.channelType !== undefined &&
+    value.channelType !== "channel" &&
+    value.channelType !== "group" &&
+    value.channelType !== "im" &&
+    value.channelType !== "mpim"
+  ) {
+    return false;
+  }
+  return (
+    value.attentionKind === undefined ||
+    value.attentionKind === "mention" ||
+    value.attentionKind === "thread-reply" ||
+    value.attentionKind === "direct-message"
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function boundedLimit(limit: number): number {
